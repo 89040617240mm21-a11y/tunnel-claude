@@ -65,6 +65,7 @@ class MainForm : Form
     static readonly Profile Pf = Profile.Load();
     static readonly string Rel = Pf.Get("rel", "версия 102");
     static readonly string AppName = Pf.Get("app_name", "Мост");   // имя в окне и журнале (Михаил, 12483, 12501)
+    static readonly string AppSub = Pf.Get("app_sub", "");   // мелкая подпись после имени: «Мост · для ИИ Агента» (Михаил, 12528)
     static readonly string SrvIp = Pf.Get("host", ""); static readonly int SrvPort = int.Parse(Pf.Get("port", "22")); static readonly string TaskName = Pf.Get("task_name", "Claude туннель");
     static readonly string SN = Pf.Get("srv_name", "поддержки"), HostAlias = Pf.Get("host_alias", "claude16");
     static readonly string TunnelUser = Pf.Get("tunnel_user", "claude_tunnel"), EnrollUser = Pf.Get("enroll_user", "claude_enroll");
@@ -92,7 +93,7 @@ class MainForm : Form
     static bool Demo { get { return Environment.GetCommandLineArgs().Any(a => a.StartsWith("--demo")); } }
     bool autoTried;
     NotifyIcon tray; bool quitting, trayTold, autoOn; CheckBox chkAuto; Rectangle rAuto;
-    static readonly string AutoTask = AppName + " окно";   // задача «запуск при входе в Windows» (по галочке)
+    static readonly string AutoTask = Pf.Get("auto_task", AppName + " окно");   // имя задачи не меняем вместе с именем программы — иначе старая задача запустит вторую копию   // задача «запуск при входе в Windows» (по галочке)
     bool ShowProg { get { return busy || (DateTime.Now - doneAt).TotalSeconds < 5; } }
     Srv[] servers; Result last;
     // компактный вид (Михаил, 12479): тумблер, номер для специалиста, 3 шага; «Подробно» — прежнее окно с таблицами
@@ -253,7 +254,7 @@ class MainForm : Form
     Bitmap bgOn, bgOff; Rectangle rBtn, rCode, rMore, rLink, rMin, rMax, rClose, rRd, rUpd; Point hover;
     // 103.9 (12521): повтор установки раз в 5 минут, пока туннель не встанет; обновление программы на лету; RustDesk и его ID в окне
     static readonly string UpdateUrl = Pf.Get("update_url", "");   // без расширения: рядом лежат .exe и .txt («103.9 SHA256»)
-    DateTime retryAt = DateTime.MinValue, updAt = DateTime.Now.AddSeconds(40); int retryN; volatile bool gotPort, updBusy; string updText = "", rdId = "";
+    DateTime retryAt = DateTime.MinValue, updAt = DateTime.Now.AddSeconds(40); int retryN; volatile bool gotPort, updBusy; string updText = "", rdId = "", rdPw = "";
     bool CodeShown { get { return last != null && last.TaskSt > 0 && last.Port != ""; } }
 
     static Bitmap Dim(Bitmap src)   // «мост погас»: почти без цвета и темнее
@@ -336,11 +337,14 @@ class MainForm : Form
         using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(new Rectangle(0, 0, w, TitleH), Color.FromArgb(58, 54, 54), Color.FromArgb(38, 35, 35), 90f)) g.FillRectangle(lg, 0, 0, w, TitleH);
         using (var pen = new Pen(Color.FromArgb(90, 0, 0, 0))) g.DrawLine(pen, 0, TitleH - 1, w, TitleH - 1);
         try { using (var ic = new Icon(Icon, 24, 24)) g.DrawIcon(ic, new Rectangle(12, (TitleH - 24) / 2, 24, 24)); } catch { }
-        using (var f = new Font("Segoe UI", 11.5f)) g.DrawString(AppName, f, Brushes.White, 44, (TitleH - f.Height) / 2f);
+        float nameW;
+        using (var f = new Font("Segoe UI", 11.5f, FontStyle.Bold)) { g.DrawString(AppName, f, Brushes.White, 44, (TitleH - f.Height) / 2f); nameW = g.MeasureString(AppName, f).Width; }
+        if (AppSub != "") using (var f = new Font("Segoe UI", 9.5f)) using (var br = new SolidBrush(Color.FromArgb(200, 200, 200)))
+        { g.DrawString(AppSub, f, br, 44 + nameW - 2, (TitleH - f.Height) / 2f + 1); nameW += g.MeasureString(AppSub, f).Width; }
         using (var f = new Font("Segoe UI", 9.5f, FontStyle.Bold))
         {   // плашка прав: зелёная «админ ✓» или красная «нет прав админа»
             string at = IsAdmin ? "админ ✓" : "нет прав админа";
-            float ax; using (var f0 = new Font("Segoe UI", 11.5f)) ax = 44 + g.MeasureString(AppName, f0).Width + 8;
+            float ax = 44 + nameW + 8;
             var sz = g.MeasureString(at, f); var ar = new RectangleF(ax, (TitleH - 22) / 2f, sz.Width + 12, 22);
             using (var pth = Round(ar, 11)) using (var br = new SolidBrush(IsAdmin ? Color.FromArgb(46, 140, 60) : Color.FromArgb(196, 43, 28))) g.FillPath(br, pth);
             g.DrawString(at, f, Brushes.White, ar.X + 6, ar.Y + (22 - sz.Height) / 2);
@@ -423,8 +427,8 @@ class MainForm : Form
             rAuto = new Rectangle((int)x, (int)y, (int)sz.Width + 26, (int)sz.Height + 4);
         }
         // вверху на картинке: RustDesk с ID (крупно — клиент фотографирует окно) и «Обновить»
-        rRd = new Rectangle((int)card.X, TitleH + 12, (int)card.Width, 46);
-        rUpd = new Rectangle((int)card.Right - 210, TitleH + 66, 210, 32);
+        rRd = new Rectangle((int)card.X, TitleH + 12, (int)card.Width, rdPw != "" ? 70 : 46);
+        rUpd = new Rectangle((int)card.Right - 210, rRd.Bottom + 8, 210, 32);
         foreach (var rr in new[] { rRd, rUpd })
             using (var pth = Round(rr, 12))
             {
@@ -432,7 +436,11 @@ class MainForm : Form
                 using (var pen = new Pen(Color.FromArgb(150, 255, 222, 175), 1.3f)) g.DrawPath(pen, pth);
             }
         using (var f = new Font("Segoe UI", 15f, FontStyle.Bold))
-            Text3D(g, rdId != "" ? "RustDesk  ID " + rdId + "  ▸" : "RustDesk ▸ открыть", f, Brushes.White, rRd, center);
+        {   // ID и пароль — одним снимком окна (Михаил, 12525–12527: пароль RustDesk можно и нужно в чат)
+            var r1 = rdPw != "" ? new Rectangle(rRd.X, rRd.Y + 4, rRd.Width, 32) : rRd;
+            Text3D(g, rdId != "" ? "RustDesk  ID " + rdId + "  ▸" : "RustDesk ▸ открыть", f, Brushes.White, r1, center);
+            if (rdPw != "") using (var br = new SolidBrush(Color.FromArgb(255, 222, 175))) Text3D(g, "пароль  " + rdPw, f, br, new Rectangle(rRd.X, rRd.Y + 34, rRd.Width, 32), center);
+        }
         using (var f = new Font("Segoe UI", 10.5f, FontStyle.Bold)) using (var br = new SolidBrush(Color.FromArgb(255, 222, 175)))
             Text3D(g, updText != "" ? updText : "⟳ Обновить · " + Rel, f, br, rUpd, center);
         // внизу на картинке — ссылка на открытый код
@@ -1191,8 +1199,39 @@ class MainForm : Form
         }
         catch { }
         if (id == "") return;
+        string pw = RdPassword(id);
         id = Regex.Replace(id, @"(\d{3})(?=\d)", "$1 ");   // 123 456 789 — легче продиктовать
-        try { BeginInvoke(new Action(() => { rdId = id; pCompact.Invalidate(); })); } catch { }
+        try { BeginInvoke(new Action(() => { rdId = id; rdPw = pw; pCompact.Invalidate(); })); } catch { }
+    }
+
+    // постоянный пароль RustDesk (Михаил, 12527: пароль RustDesk можно и нужно в чат): ставим свой один раз, храним рядом
+    // с ключами туннеля (только SYSTEM и администраторы), показываем в окне и пишем в журнал входов — специалисту не надо спрашивать
+    static readonly string RdPwFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"ClaudeTunnel\rustdesk_pw.txt");
+    string RdPassword(string id)
+    {
+        if (Demo) return "k7m2p9xq";   // снимок для проверки — пароль на этом ПК не трогаем
+        try
+        {
+            if (File.Exists(RdPwFile)) { var old = File.ReadAllText(RdPwFile).Trim(); if (old != "") return old; }
+            var f = RdExe(); if (f == null || !IsAdmin) return "";
+            const string abc = "abcdefghjkmnpqrstuvwxyz23456789";   // без похожих 0/o, 1/l/i
+            var b = new byte[8]; using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(b);
+            string pw = new string(b.Select(x => abc[x % abc.Length]).ToArray());
+            var p = Process.Start(new ProcessStartInfo(f, "--password " + pw) { UseShellExecute = false, CreateNoWindow = true });
+            if (!p.WaitForExit(15000)) { try { p.Kill(); } catch { } return ""; }
+            Directory.CreateDirectory(Path.GetDirectoryName(RdPwFile)); File.WriteAllText(RdPwFile, pw);
+            try
+            {
+                var acl = new FileSecurity(); acl.SetAccessRuleProtection(true, false);
+                foreach (var sid in new[] { WellKnownSidType.LocalSystemSid, WellKnownSidType.BuiltinAdministratorsSid })
+                    acl.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(sid, null), FileSystemRights.FullControl, AccessControlType.Allow));
+                File.SetAccessControl(RdPwFile, acl);
+            }
+            catch { }
+            Journal(null, "RUSTDESK", "ID " + id + ", пароль " + pw, "этот ПК", "постоянный пароль поставлен программой");
+            return pw;
+        }
+        catch { return ""; }
     }
 
     static string Res(string name)
