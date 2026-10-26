@@ -89,7 +89,6 @@ class MainForm : Form
     static readonly string[] StepNames = { "запускаю установку", "SSH на этом ПК", "программа ssh", "личный ключ ПК", "регистрация на сервере", "задача автозапуска", "проверка связи" };
     int stepN; string stepLine = ""; double prog, progShown; DateTime doneAt = DateTime.MinValue; bool doneOk; System.Windows.Forms.Timer anim;
     static readonly bool IsAdmin = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
-    static readonly string AutoOffFlag = Path.Combine(GuiDir, "auto-off.flag");   // есть — человек сам снял галочку «Запуск с Windows», обратно не ставим
     static bool Demo { get { return Environment.GetCommandLineArgs().Any(a => a.StartsWith("--demo")); } }
     bool autoTried;
     NotifyIcon tray; bool quitting, trayTold, autoOn; CheckBox chkAuto; Rectangle rAuto;
@@ -805,6 +804,7 @@ class MainForm : Form
     static readonly string NoLogFlag = Path.Combine(GuiDir, "nolog.flag");
     static readonly string SetupFlag = Path.Combine(GuiDir, "setup-pending.flag");   // есть — установка шла и не закончилась
     static readonly string FullFlag = Path.Combine(GuiDir, "full.flag");   // есть — окно открывается в подробном виде
+    static readonly string AutoOffFlag = Path.Combine(GuiDir, "auto-off.flag");   // есть — человек сам снял галочку «Запуск с Windows», обратно не ставим
     static readonly string HostKeys = string.Join("", Pf.Sections("hostkeys").SelectMany(h => h.All("line")).Select(x => x + "\n"));
     static readonly object slock = new object();
     volatile string sendInfo = "ещё не отправлялся"; volatile int sendSt = 3;
