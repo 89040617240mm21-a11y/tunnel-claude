@@ -53,7 +53,9 @@ foreach ($f in 'setup_core.ps1', 'setup_suffix.ps1') {
 $cs = 'TunnelGui.cs'; if (Test-Path 'src\TunnelGui.cs') { $cs = 'src\TunnelGui.cs' }
 $csc = "$env:windir\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if (-not (Test-Path $csc)) { $csc = "$env:windir\Microsoft.NET\Framework\v4.0.30319\csc.exe" }
-& $csc -nologo -codepage:65001 -target:winexe "-out:$Out" -win32manifest:app.manifest -win32icon:tunnel.ico `
+$ico = M 'icon' 'tunnel.ico'   # значок и фон окна — из профиля (у нас «Мост»: theme\most.ico, 12483)
+$bg = @(); if (Test-Path 'theme\bg.jpg') { $bg = @('-resource:theme\bg.jpg,bg.jpg') }
+& $csc -nologo -codepage:65001 -target:winexe "-out:$Out" -win32manifest:app.manifest "-win32icon:$ico" @bg `
     -resource:obj\setup_core.ps1,setup_core.ps1 -resource:obj\setup_suffix.ps1,setup_suffix.ps1 "-resource:$Ini,profile.ini" `
     -r:System.Management.dll -r:System.ServiceProcess.dll -r:Microsoft.CSharp.dll -r:System.Core.dll `
     -r:System.Windows.Forms.dll -r:System.Drawing.dll $cs

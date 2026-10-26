@@ -60,6 +60,7 @@ class MainForm : Form
     // профиль сборки (profile.ini, вшит ресурсом): сервер, порт, имена, ключи специалистов, серверы с флагами
     static readonly Profile Pf = Profile.Load();
     static readonly string Rel = Pf.Get("rel", "версия 102");
+    static readonly string AppName = Pf.Get("app_name", "Туннель Claude");   // имя в окне (у нас — «Мост», 12483)
     static readonly string SrvIp = Pf.Get("host", ""); static readonly int SrvPort = int.Parse(Pf.Get("port", "22")); static readonly string TaskName = Pf.Get("task_name", "Claude туннель");
     static readonly string SN = Pf.Get("srv_name", "поддержки"), HostAlias = Pf.Get("host_alias", "claude16");
     static readonly string TunnelUser = Pf.Get("tunnel_user", "claude_tunnel"), EnrollUser = Pf.Get("enroll_user", "claude_enroll");
@@ -82,14 +83,15 @@ class MainForm : Form
     System.Windows.Forms.Timer tm; volatile bool checking, busy;
     Srv[] servers; Result last;
     // компактный вид (Михаил, 12479): тумблер, номер для специалиста, 3 шага; «Подробно» — прежнее окно с таблицами
-    Panel pCompact, pToggle; Label lblCState, lblCCode, lblCSteps; Button bCCopy; LinkLabel lnkMore, lnkSrc; Control[] full; bool copied;
+    Panel pCompact; LinkLabel lnkSrc; Control[] full; bool copiedFlag; DateTime copiedAt;
+    bool copied { get { return copiedFlag; } set { copiedFlag = value; if (value) copiedAt = DateTime.Now; } }
 
     public MainForm()
     {
         foreach (var k in Pf.Sections("key")) AddKey(k.Get("blob", ""), k.Get("label", ""));
         servers = Pf.Sections("server").Select(s => new Srv(s.Get("name", ""), s.Get("ip", ""), s.Get("radmin", ""), int.Parse(s.Get("tcp", "0")), FlagBy(s.Get("flag", "")))).ToArray();
 
-        Text = "Туннель Claude — " + Rel + " — ПК " + Environment.MachineName;
+        Text = AppName + " — " + Rel + " — ПК " + Environment.MachineName;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
         Font = new Font("Segoe UI", 11f);
         ClientSize = new Size(940, 860); MinimumSize = new Size(760, 640);
@@ -164,50 +166,104 @@ class MainForm : Form
 
     void BuildCompact()
     {
-        pCompact = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Visible = false };
-        pToggle = new Panel { Size = new Size(150, 150), Cursor = Cursors.Hand };
-        pToggle.Paint += (s, e) =>
+        // вид «Закат» (Михаил, 12483): во всё окно картинка с мостом — включено ярко, выключено тускло; поверх полупрозрачная карточка
+        try { using (var st = Assembly.GetExecutingAssembly().GetManifestResourceStream("bg.jpg")) if (st != null) { bgOn = new Bitmap(st); bgOff = Dim(bgOn); } } catch { }
+        pCompact = new Canvas { Dock = DockStyle.Fill, BackColor = Color.FromArgb(40, 30, 28), Visible = false };
+        pCompact.Paint += (s, e) => PaintCompact(e.Graphics);
+        pCompact.MouseMove += (s, e) => { pCompact.Cursor = rBtn.Contains(e.Location) || rCode.Contains(e.Location) && CodeShown || rMore.Contains(e.Location) ? Cursors.Hand : Cursors.Default; };
+        pCompact.MouseClick += (s, e) =>
         {
-            var g = e.Graphics; g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            bool on = last != null && last.TaskSt > 0;
-            Color c = last == null || busy || !on ? Color.FromArgb(160, 160, 160) : last.Overall == 1 ? Color.FromArgb(25, 150, 60) : last.Overall == 2 ? Color.FromArgb(215, 140, 0) : Color.FromArgb(200, 35, 35);
-            using (var halo = new SolidBrush(Color.FromArgb(45, c))) g.FillEllipse(halo, 2, 2, 145, 145);
-            using (var b = new SolidBrush(c)) g.FillEllipse(b, 14, 14, 121, 121);
-            using (var pen = new Pen(Color.White, 9) { StartCap = System.Drawing.Drawing2D.LineCap.Round, EndCap = System.Drawing.Drawing2D.LineCap.Round })
-            { g.DrawArc(pen, 46, 48, 58, 58, -55, 290); g.DrawLine(pen, 75, 40, 75, 74); }   // значок питания
-        };
-        pToggle.Click += delegate { if (busy || last == null) return; if (last.TaskSt > 0 && last.Overall != 0) DoOff(); else DoOn(); };
-        new ToolTip().SetToolTip(pToggle, "Нажмите, чтобы включить или выключить доступ специалистов");
-        var lblOff = new Label { Text = "ВЫКЛ", AutoSize = true, Font = new Font("Segoe UI", 16f, FontStyle.Bold), ForeColor = Color.FromArgb(140, 140, 140) };
-        var lblOn = new Label { Text = "ВКЛ", AutoSize = true, Font = new Font("Segoe UI", 16f, FontStyle.Bold), ForeColor = Color.FromArgb(25, 150, 60) };
-        lblCState = new Label { TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Segoe UI", 17f, FontStyle.Bold), Text = "Проверяю..." };
-        lblCCode = new Label { TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Segoe UI", 32f, FontStyle.Bold) };
-        bCCopy = new Button { Text = "Скопировать номер для чата", FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(243, 243, 243), Font = new Font("Segoe UI", 12f) };
-        bCCopy.FlatAppearance.BorderColor = Color.FromArgb(205, 205, 205);
-        bCCopy.Click += delegate
-        {
-            if (last == null || last.Port == "") return;
-            try { Clipboard.SetText("Туннель Claude: номер " + last.Port + ", ПК " + Environment.MachineName); bCCopy.Text = "Скопировано — вставьте в чат (Ctrl+V)"; copied = true; } catch { }
-        };
-        lblCSteps = new Label { TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Segoe UI", 13f), ForeColor = Color.FromArgb(70, 70, 70) };
-        lnkMore = new LinkLabel { Text = "Подробно ▾", AutoSize = true, Font = new Font("Segoe UI", 12f) };
-        lnkMore.LinkClicked += delegate { SetMode(true); };
-        pCompact.Controls.AddRange(new Control[] { lblOff, pToggle, lblOn, lblCState, lblCCode, bCCopy, lblCSteps, lnkMore });
-        pCompact.Resize += delegate
-        {
-            int w = pCompact.ClientSize.Width, cx = w / 2;
-            pToggle.Location = new Point(cx - 75, 14);
-            lblOff.Location = new Point(cx - 95 - lblOff.Width, 89 - lblOff.Height / 2);
-            lblOn.Location = new Point(cx + 95, 89 - lblOn.Height / 2);
-            lblCState.SetBounds(10, 172, w - 20, 40); lblCCode.SetBounds(10, 212, w - 20, 64);
-            bCCopy.SetBounds(cx - 170, 282, 340, 44); lblCSteps.SetBounds(10, 336, w - 20, 40);
-            lnkMore.Location = new Point(cx - lnkMore.Width / 2, 380);
+            if (rBtn.Contains(e.Location)) { if (busy || last == null) return; if (last.TaskSt > 0 && last.Overall != 0) DoOff(); else DoOn(); }
+            else if (rCode.Contains(e.Location) && CodeShown)
+            {
+                try { Clipboard.SetText("Номер для специалиста: " + last.Port + ", ПК " + Environment.MachineName); copied = true; pCompact.Invalidate(); } catch { }
+            }
+            else if (rMore.Contains(e.Location)) SetMode(true);
         };
         Controls.Add(pCompact); pCompact.BringToFront();
 
         var bBack = Btn("Компактно ▴", Color.FromArgb(120, 120, 120), 140);   // из подробного вида — обратно
         bBack.Click += delegate { SetMode(false); };
         bJournal.Parent.Controls.Add(bBack);
+    }
+
+    class Canvas : Panel { public Canvas() { DoubleBuffered = true; ResizeRedraw = true; } }
+    Bitmap bgOn, bgOff; Rectangle rBtn, rCode, rMore;
+    bool CodeShown { get { return last != null && last.TaskSt > 0 && last.Port != ""; } }
+
+    static Bitmap Dim(Bitmap src)   // «мост погас»: почти без цвета и темнее
+    {
+        var b = new Bitmap(src.Width, src.Height);
+        float k = 0.45f, g = 0.25f;   // яркость и остаток цвета
+        var m = new System.Drawing.Imaging.ColorMatrix(new[] {
+            new[] { k * (0.3f + 0.7f * g), k * 0.3f * (1 - g), k * 0.3f * (1 - g), 0, 0 },
+            new[] { k * 0.59f * (1 - g), k * (0.59f + 0.41f * g), k * 0.59f * (1 - g), 0, 0 },
+            new[] { k * 0.11f * (1 - g), k * 0.11f * (1 - g), k * (0.11f + 0.89f * g), 0, 0 },
+            new[] { 0f, 0, 0, 1, 0 }, new[] { 0f, 0, 0, 0, 1 } });
+        using (var gr = Graphics.FromImage(b)) using (var ia = new System.Drawing.Imaging.ImageAttributes())
+        { ia.SetColorMatrix(m); gr.DrawImage(src, new Rectangle(0, 0, b.Width, b.Height), 0, 0, src.Width, src.Height, GraphicsUnit.Pixel, ia); }
+        return b;
+    }
+
+    static System.Drawing.Drawing2D.GraphicsPath Round(RectangleF r, float rad)
+    {
+        var p = new System.Drawing.Drawing2D.GraphicsPath(); float d = rad * 2;
+        p.AddArc(r.X, r.Y, d, d, 180, 90); p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); p.AddArc(r.X, r.Bottom - d, d, d, 90, 90); p.CloseFigure(); return p;
+    }
+
+    void PaintCompact(Graphics g)
+    {
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias; g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+        int w = pCompact.ClientSize.Width, h = pCompact.ClientSize.Height;
+        bool on = last != null && last.TaskSt > 0, lit = on && last.Overall == 1;
+        var bg = lit ? bgOn : bgOff;
+        if (bg != null)
+        {   // картинку растягиваем по ширине, низ (облака) уходит под карточку
+            float sc = Math.Max((float)w / bg.Width, (float)h / bg.Height);
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            g.DrawImage(bg, (w - bg.Width * sc) / 2, 0, bg.Width * sc, bg.Height * sc);
+        }
+        else using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(new Rectangle(0, 0, w, h), Color.FromArgb(lit ? 250 : 120, lit ? 150 : 110, lit ? 60 : 100), Color.FromArgb(40, 30, 28), 90f)) g.FillRectangle(lg, 0, 0, w, h);
+
+        var card = new RectangleF(40, h * 0.50f, w - 80, 214);
+        using (var p = Round(card, 18)) { using (var br = new SolidBrush(Color.FromArgb(150, 20, 16, 14))) g.FillPath(br, p); using (var pen = new Pen(Color.FromArgb(70, 255, 220, 170))) g.DrawPath(pen, p); }
+        var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+
+        Color[] dot = { Color.FromArgb(240, 70, 60), Color.FromArgb(80, 220, 100), Color.FromArgb(255, 190, 40), Color.FromArgb(170, 170, 170) };
+        string head = last == null ? "Проверяю..." : busy ? "Устанавливаю..." : last.TaskSt == -1 ? "Не установлен" : !on ? AppName + " закрыт" : last.Overall == 1 ? AppName + " открыт" : last.Overall == 2 ? "Подключаюсь..." : "Нет связи";
+        using (var f = new Font("Segoe UI", 24f, FontStyle.Bold))
+        {
+            var sz = g.MeasureString(head, f); float x = (w - sz.Width - 26) / 2, y = card.Y + 16;
+            using (var br = new SolidBrush(last == null ? dot[3] : busy ? dot[2] : !on ? dot[3] : dot[last.Overall])) g.FillEllipse(br, x, y + sz.Height / 2 - 9, 18, 18);
+            g.DrawString(head, f, Brushes.White, x + 26, y);
+        }
+        string code = CodeShown ? "Номер: " + last.Port : last != null && last.TaskSt == -1 ? "нажмите «Включить»" : on ? "номер появится через минуту" : "специалисты не могут зайти";
+        rCode = new Rectangle((int)card.X, (int)card.Y + 64, (int)card.Width, 50);
+        using (var f = new Font("Segoe UI", CodeShown ? 24f : 14f, FontStyle.Bold)) g.DrawString(code, f, Brushes.White, rCode, center);
+        if (CodeShown && copied)
+            using (var f = new Font("Segoe UI", 10.5f)) using (var br = new SolidBrush(Color.FromArgb(255, 215, 160)))
+                g.DrawString("Скопировано — вставьте в чат (Ctrl+V)", f, br, new RectangleF(card.X, card.Y + 110, card.Width, 22), center);
+
+        rBtn = new Rectangle((int)card.X + 28, (int)card.Y + 138, (int)card.Width - 56, 56);
+        bool off = on && last.Overall != 0;
+        using (var p = Round(rBtn, 14))
+        using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(rBtn, Color.FromArgb(busy ? 150 : 255, busy ? 140 : 196, busy ? 130 : 80), Color.FromArgb(busy ? 110 : 226, busy ? 100 : 128, busy ? 95 : 20), 90f))
+            g.FillPath(lg, p);
+        string bt = busy ? "Подождите..." : off ? "Отключить" : "Включить";
+        using (var f = new Font("Segoe UI", 16f, FontStyle.Bold))
+        {
+            var sz = g.MeasureString(bt, f); float x = rBtn.X + (rBtn.Width - sz.Width - 34) / 2, cy = rBtn.Y + rBtn.Height / 2f;
+            using (var pen = new Pen(Color.White, 3.2f) { StartCap = System.Drawing.Drawing2D.LineCap.Round, EndCap = System.Drawing.Drawing2D.LineCap.Round })
+            { g.DrawArc(pen, x, cy - 11, 22, 22, -60, 300); g.DrawLine(pen, x + 11, cy - 15, x + 11, cy - 3); }   // значок питания
+            g.DrawString(bt, f, Brushes.White, x + 34, cy - sz.Height / 2);
+        }
+
+        using (var f = new Font("Segoe UI", 11f, FontStyle.Underline)) using (var br = new SolidBrush(Color.FromArgb(255, 215, 160)))
+        {
+            var sz = g.MeasureString("Подробно ▾", f); rMore = new Rectangle((int)(card.Right - sz.Width), (int)card.Bottom + 6, (int)sz.Width, (int)sz.Height);
+            g.DrawString("Подробно ▾", f, br, rMore.X, rMore.Y);
+        }
     }
 
     void SetMode(bool isFull)
@@ -220,8 +276,10 @@ class MainForm : Form
         lnkSrc.LinkArea = new LinkArea(lnkSrc.Text.Length - url.Length, url.Length);
         lnkSrc.TextAlign = isFull ? ContentAlignment.MiddleLeft : ContentAlignment.MiddleCenter;
         lnkSrc.Font = new Font("Segoe UI", isFull ? 11f : 9.5f);
+        lnkSrc.BackColor = isFull ? Color.White : Color.FromArgb(28, 22, 20); lnkSrc.ForeColor = isFull ? SystemColors.ControlText : Color.FromArgb(200, 190, 180);
+        lnkSrc.LinkColor = isFull ? Color.FromArgb(0, 102, 204) : Color.FromArgb(255, 215, 160);
         if (isFull) { MinimumSize = new Size(760, 640); ClientSize = new Size(940, 860); }
-        else { MinimumSize = new Size(470, 470); ClientSize = new Size(500, 460); }
+        else { MinimumSize = new Size(420, 560); ClientSize = new Size(480, 650); }
         try { Directory.CreateDirectory(GuiDir); if (isFull) File.WriteAllText(FullFlag, "подробный вид"); else File.Delete(FullFlag); } catch { }
         ResumeLayout(); FitColumns();
         if (IsHandleCreated) CenterToScreen();
@@ -229,16 +287,8 @@ class MainForm : Form
 
     void ShowCompact(Result r)
     {
-        bool on = r.TaskSt > 0;
-        Color[] cs = { Color.FromArgb(200, 35, 35), Color.FromArgb(25, 140, 55), Color.FromArgb(215, 140, 0), Color.FromArgb(110, 110, 110) };
-        lblCState.ForeColor = cs[r.Overall];
-        lblCState.Text = busy ? "Устанавливаю... подождите" : r.TaskSt == -1 ? "Не установлен — нажмите на круг" : !on ? "● Доступ выключен" : r.Overall == 1 ? "● В сети — доступ открыт" : r.Overall == 2 ? "● Почти готово — подключаюсь" : "● Нет связи — нажмите «Подробно»";
-        lblCCode.Text = on && r.Port != "" ? "Номер: " + r.Port : "";
-        bCCopy.Visible = on && r.Port != "";
-        if (copied) copied = false; else bCCopy.Text = "Скопировать номер для чата";   // «Скопировано» держится одну проверку (~5 с)
-        Func<string, string> mark = n => { var row = r.Rows.FirstOrDefault(x => x.Name.StartsWith(n)); return row == null || row.St == 3 ? "○" : row.St == 1 ? "✔" : row.St == 2 ? "…" : "✖"; };
-        lblCSteps.Text = mark("Связь с сервером") + " Интернет      " + mark("SSH отвечает") + " Вход      " + mark("Туннель до сервера") + " Канал";
-        pToggle.Invalidate();
+        if (copied && (DateTime.Now - copiedAt).TotalSeconds > 6) copied = false;
+        pCompact.Invalidate();
     }
 
     void FitColumns()
@@ -548,6 +598,7 @@ class MainForm : Form
 
     void Show(Result r)
     {
+        if (Environment.GetCommandLineArgs().Contains("--demo")) { r.TaskSt = 1; r.Overall = 1; r.Port = "22045"; }   // снимки для сайта: вид «открыт», ничего не включает
         last = r;
         Color[] cs = { Color.FromArgb(200, 35, 35), Color.FromArgb(25, 140, 55), Color.FromArgb(215, 140, 0), Color.FromArgb(110, 110, 110) };
         lblStatus.BackColor = cs[r.Overall]; lblStatus.Text = r.Head;
@@ -755,7 +806,7 @@ class MainForm : Form
 
     void DoOff()
     {
-        if (MessageBox.Show(this, "Выключить доступ специалистов к этому компьютеру?\nВключить снова — кнопка «ВКЛЮЧИТЬ».", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        if (MessageBox.Show(this, "Выключить доступ специалистов к этому компьютеру?\nВключить снова — кнопка «Включить».", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         try { TaskSet(false); } catch (Exception ex) { Log("Задача: " + ex.Message); }
         double up; foreach (int pid in TunnelPids(out up)) { try { Process.GetProcessById(pid).Kill(); } catch { } }
         Log("Доступ выключен: задача «" + TaskName + "» отключена, соединение с сервером " + SN + " разорвано.");
