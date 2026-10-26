@@ -175,7 +175,8 @@ class MainForm : Form
         Log("Программа «" + AppName + "» " + Rel + ". Журнал входов: " + JournalPath);
         EnsureJournal();
         tm = new System.Windows.Forms.Timer { Interval = 5000 };
-        tm.Tick += delegate { StartCheck(); };
+        tm.Tick += delegate { StartCheck(); Combine(); };
+        ThreadPool.QueueUserWorkItem(_ => ReadRdId());
         BuildTray();
         Shown += delegate
         {
@@ -205,7 +206,7 @@ class MainForm : Form
         pCompact.MouseMove += (s, e) =>
         {
             hover = e.Location; pCompact.Invalidate(new Rectangle(0, 0, pCompact.Width, TitleH));
-            pCompact.Cursor = rBtn.Contains(e.Location) || rCode.Contains(e.Location) && CodeShown || rLink.Contains(e.Location) || rAuto.Contains(e.Location) ? Cursors.Hand : Cursors.Default;
+            pCompact.Cursor = rBtn.Contains(e.Location) || rCode.Contains(e.Location) && CodeShown || rLink.Contains(e.Location) || rAuto.Contains(e.Location) || rRd.Contains(e.Location) || rUpd.Contains(e.Location) ? Cursors.Hand : Cursors.Default;
         };
         pCompact.MouseDown += (s, e) =>   // тянем окно за верхнюю строку
         {
@@ -223,6 +224,8 @@ class MainForm : Form
             }
             else if (rLink.Contains(e.Location)) { try { Process.Start(SourceUrl); } catch { } }
             else if (rAuto.Contains(e.Location)) { AutoSet(!autoOn); pCompact.Invalidate(); }
+            else if (rRd.Contains(e.Location)) OpenRustDesk();
+            else if (rUpd.Contains(e.Location)) CheckUpdate(true);
         };
         Controls.Add(pCompact); pCompact.BringToFront();
         Resize += delegate { if (pCompact.Visible) Corners(); };
@@ -247,7 +250,10 @@ class MainForm : Form
 
     class Canvas : Panel { public Canvas() { DoubleBuffered = true; ResizeRedraw = true; } }
     const int TitleH = 40;
-    Bitmap bgOn, bgOff; Rectangle rBtn, rCode, rMore, rLink, rMin, rMax, rClose; Point hover;
+    Bitmap bgOn, bgOff; Rectangle rBtn, rCode, rMore, rLink, rMin, rMax, rClose, rRd, rUpd; Point hover;
+    // 103.9 (12521): повтор установки раз в 5 минут, пока туннель не встанет; обновление программы на лету; RustDesk и его ID в окне
+    static readonly string UpdateUrl = Pf.Get("update_url", "");   // без расширения: рядом лежат .exe и .txt («103.9 SHA256»)
+    DateTime retryAt = DateTime.MinValue, updAt = DateTime.Now.AddSeconds(40); int retryN; volatile bool gotPort, updBusy; string updText = "", rdId = "";
     bool CodeShown { get { return last != null && last.TaskSt > 0 && last.Port != ""; } }
 
     static Bitmap Dim(Bitmap src)   // «мост погас»: почти без цвета и темнее
@@ -288,7 +294,7 @@ class MainForm : Form
     {   // «Шаг 4 из 7 · личный ключ ПК», под ней золотая полоса с процентами и последняя строка скрипта
         bool done = !busy;
         int pc = done && doneOk ? 100 : (int)Math.Round(Math.Min(progShown, 0.99) * 100);
-        string st = done ? (doneOk ? "Готово · шаг 7 из 7" : "Установка не закончена") : "Шаг " + Math.Max(stepN, 0) + " из 7 · " + StepNames[Math.Min(stepN, 7)];
+        string st = done ? (doneOk ? "Готово · шаг 7 из 7" : retryAt != DateTime.MinValue ? "Не вышло · повтор в " + retryAt.ToString("HH:mm") : "Установка не закончена") : "Шаг " + Math.Max(stepN, 0) + " из 7 · " + StepNames[Math.Min(stepN, 7)];
         using (var f = new Font("Segoe UI", 13.5f, FontStyle.Bold)) Text3D(g, st, f, Brushes.White, new RectangleF(card.X, card.Y + 64, card.Width, 28), center);
         var tr = new RectangleF(card.X + 26, card.Y + 100, card.Width - 52 - 58, 16);
         using (var p = Round(tr, 8))
@@ -416,6 +422,19 @@ class MainForm : Form
             Text3D(g, "Запуск с Windows", f, br, new RectangleF(x + 22, y, sz.Width + 6, sz.Height + 4), new StringFormat());
             rAuto = new Rectangle((int)x, (int)y, (int)sz.Width + 26, (int)sz.Height + 4);
         }
+        // вверху на картинке: RustDesk с ID (крупно — клиент фотографирует окно) и «Обновить»
+        rRd = new Rectangle((int)card.X, TitleH + 12, (int)card.Width, 46);
+        rUpd = new Rectangle((int)card.Right - 210, TitleH + 66, 210, 32);
+        foreach (var rr in new[] { rRd, rUpd })
+            using (var pth = Round(rr, 12))
+            {
+                using (var br = new SolidBrush(Color.FromArgb(rr.Contains(hover) ? 200 : 160, 30, 24, 20))) g.FillPath(br, pth);
+                using (var pen = new Pen(Color.FromArgb(150, 255, 222, 175), 1.3f)) g.DrawPath(pen, pth);
+            }
+        using (var f = new Font("Segoe UI", 15f, FontStyle.Bold))
+            Text3D(g, rdId != "" ? "RustDesk  ID " + rdId + "  ▸" : "RustDesk ▸ открыть", f, Brushes.White, rRd, center);
+        using (var f = new Font("Segoe UI", 10.5f, FontStyle.Bold)) using (var br = new SolidBrush(Color.FromArgb(255, 222, 175)))
+            Text3D(g, updText != "" ? updText : "⟳ Обновить · " + Rel, f, br, rUpd, center);
         // внизу на картинке — ссылка на открытый код
         string url = SourceUrl.Replace("https://", "");
         using (var f = new Font("Segoe UI", 10f)) using (var fu = new Font("Segoe UI", 10f, FontStyle.Underline))
@@ -1060,7 +1079,7 @@ class MainForm : Form
         if (busy) return;
         busy = true; bOn.Enabled = bOff.Enabled = bFix.Enabled = false;
         try { Directory.CreateDirectory(GuiDir); File.WriteAllText(SetupFlag, why + " " + DateTime.Now); } catch { }
-        stepN = 0; prog = progShown = 0; stepLine = "займёт 1–3 минуты"; doneAt = DateTime.MinValue; AnimStart();
+        stepN = 0; gotPort = false; retryAt = DateTime.MinValue; prog = progShown = 0; stepLine = "займёт 1–3 минуты"; doneAt = DateTime.MinValue; AnimStart();
         string ph = Regex.Replace(txtPhone.Text, @"\D", "");
         Log(""); Log("=== " + DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss") + " установка туннеля (кнопка «" + why + "»), займёт 1–3 минуты...");
         Journal(null, "УСТАНОВКА", "клиент (кнопка «" + why + "»)", "этот ПК", "сотовый: " + (ph != "" ? ph : "не указан"));
@@ -1072,12 +1091,108 @@ class MainForm : Form
             { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true, StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 };
             psi.EnvironmentVariables["CLAUDE_PHONE"] = ph;
             var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
-            p.OutputDataReceived += (s, e) => { if (e.Data != null) { Log(e.Data); Progress(e.Data); Journal(null, "  установка", "", "", e.Data); } };
+            p.OutputDataReceived += (s, e) => { if (e.Data != null) { if (e.Data.Contains("НОМЕР КЛИЕНТА")) gotPort = true; Log(e.Data); Progress(e.Data); Journal(null, "  установка", "", "", e.Data); } };
             p.ErrorDataReceived += (s, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) { Log("ОШИБКА: " + e.Data); Journal(null, "  установка", "", "", "ОШИБКА: " + e.Data); } };
-            p.Exited += (s, e) => { try { BeginInvoke(new Action(() => { busy = false; bFix.Enabled = true; doneOk = p.ExitCode == 0; doneAt = DateTime.Now; try { File.Delete(SetupFlag); } catch { } prog = 1; stepLine = doneOk ? "все 6 шагов пройдены" : "ошибка — нажмите «Подробно»"; Log("=== установка закончена. Смотрите статус вверху окна."); try { File.Delete(tmp); } catch { } pending = "установка (кнопка «" + why + "»), код выхода " + p.ExitCode; StartCheck(); })); } catch { } };
+            p.Exited += (s, e) => { try { BeginInvoke(new Action(() => { busy = false; bFix.Enabled = true; doneOk = p.ExitCode == 0 && gotPort; doneAt = DateTime.Now; try { File.Delete(SetupFlag); } catch { } prog = 1;
+                if (doneOk) retryN = 0; else { retryN++; retryAt = DateTime.Now.AddMinutes(5); Journal(null, "ОТКАЗ", "установка, попытка " + retryN, "этот ПК", "код " + p.ExitCode + ", повтор в " + retryAt.ToString("HH:mm")); }
+                stepLine = doneOk ? "все 6 шагов пройдены" : "пробую снова сам — окно можно не закрывать"; Log("=== установка закончена. Смотрите статус вверху окна."); try { File.Delete(tmp); } catch { } pending = "установка (кнопка «" + why + "»), код выхода " + p.ExitCode; StartCheck(); })); } catch { } };
             p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
         }
         catch (Exception ex) { busy = false; bFix.Enabled = true; doneOk = false; doneAt = DateTime.Now; stepLine = "установка не запустилась"; Log("Не запустилась установка: " + ex.Message); }
+    }
+
+    // «комбайн» (Михаил, 12521): туннель не встал — ждём 5 минут, ловим новую версию, пробуем снова; каждый отказ уходит в журнал на сервер
+    void Combine()
+    {
+        if (busy || updBusy) return;
+        if (retryAt != DateTime.MinValue && last != null && last.TaskSt > 0 && last.Overall == 1) { retryAt = DateTime.MinValue; retryN = 0; return; }   // встал сам
+        if (retryAt != DateTime.MinValue && DateTime.Now >= retryAt) { retryAt = DateTime.MinValue; CheckUpdate(false, () => RunSetup("повтор " + (retryN + 1))); return; }
+        if (DateTime.Now >= updAt) { updAt = DateTime.Now.AddHours(1); CheckUpdate(false); }
+        if (rdId == "" && DateTime.Now.Second < 5) ThreadPool.QueueUserWorkItem(_ => ReadRdId());
+    }
+
+    static Version Ver(string s) { var m = Regex.Match(s ?? "", @"\d+(\.\d+){0,3}"); Version v; return m.Success && Version.TryParse(m.Value.Contains(".") ? m.Value : m.Value + ".0", out v) ? v : new Version(0, 0); }
+
+    // кнопка «Обновить» и проверка раз в час: на сервере файл .txt («103.9 SHA256»), качаем .exe, сверяем SHA256, подменяем себя и перезапускаемся
+    void CheckUpdate(bool manual, Action after = null)
+    {
+        if (updBusy || UpdateUrl == "") { if (manual && UpdateUrl == "") { updText = "обновления выключены"; pCompact.Invalidate(); } if (after != null) after(); return; }
+        updBusy = true; if (manual) { updText = "проверяю..."; pCompact.Invalidate(); }
+        bool vis = Visible;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            string msg = ""; bool restart = false;
+            try
+            {
+                System.Net.ServicePointManager.SecurityProtocol |= (System.Net.SecurityProtocolType)3072;   // TLS 1.2 на старых Windows
+                using (var wc = new System.Net.WebClient())
+                {
+                    wc.Encoding = Encoding.UTF8;
+                    var parts = wc.DownloadString(UpdateUrl + ".txt?t=" + DateTime.Now.Ticks).Trim().Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length < 2 || Ver(parts[0]) <= Ver(Rel)) msg = "у вас последняя · " + Rel;
+                    else
+                    {
+                        if (manual) BeginInvoke(new Action(() => { updText = "качаю " + parts[0] + "..."; pCompact.Invalidate(); }));
+                        string tmp = Path.Combine(Path.GetTempPath(), "ryadom_new.exe");
+                        wc.DownloadFile(UpdateUrl + ".exe?t=" + DateTime.Now.Ticks, tmp);
+                        string sha; using (var h = SHA256.Create()) using (var fs = File.OpenRead(tmp)) sha = BitConverter.ToString(h.ComputeHash(fs)).Replace("-", "");
+                        if (!sha.Equals(parts[1], StringComparison.OrdinalIgnoreCase)) { msg = "файл повреждён — не ставлю"; File.Delete(tmp); }
+                        else
+                        {
+                            string cur = Application.ExecutablePath, cmd = Path.Combine(Path.GetTempPath(), "ryadom_update.cmd");
+                            string args = vis ? "" : "--autostart";
+                            File.WriteAllText(cmd, "@echo off\r\nping -n 4 127.0.0.1 >nul\r\nfor /l %%i in (1,1,10) do (copy /y \"" + tmp + "\" \"" + cur + "\" >nul 2>&1 && goto ok\r\nping -n 2 127.0.0.1 >nul)\r\n:ok\r\nstart \"\" \"" + cur + "\" " + args + "\r\ndel \"%~f0\"\r\n", Encoding.GetEncoding(866));
+                            Journal(null, "ОБНОВЛЕНИЕ", Rel + " -> " + parts[0], "этот ПК", manual ? "кнопка «Обновить»" : "сама");
+                            if (after != null) try { Directory.CreateDirectory(GuiDir); File.WriteAllText(SetupFlag, "повтор после обновления " + DateTime.Now); } catch { }   // новая версия сама продолжит установку
+                            Process.Start(new ProcessStartInfo("cmd.exe", "/c \"" + cmd + "\"") { CreateNoWindow = true, UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden });
+                            restart = true;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { msg = "нет связи с сервером обновлений"; try { BeginInvoke(new Action(() => Log("Обновление: " + ex.Message))); } catch { } }
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    updBusy = false;
+                    if (restart) { quitting = true; tray.Visible = false; Close(); return; }
+                    if (manual) { updText = msg; pCompact.Invalidate(); var t = new System.Windows.Forms.Timer { Interval = 6000 }; t.Tick += delegate { t.Stop(); t.Dispose(); updText = ""; pCompact.Invalidate(); }; t.Start(); }
+                    if (after != null) after();
+                }));
+            }
+            catch { updBusy = false; }
+        });
+    }
+
+    static string RdExe() { foreach (var d in new[] { Environment.GetEnvironmentVariable("ProgramW6432"), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles) }) { if (string.IsNullOrEmpty(d)) continue; var f = Path.Combine(d, "RustDesk\\rustdesk.exe"); if (File.Exists(f)) return f; } return null; }
+
+    void OpenRustDesk()
+    {
+        var f = RdExe();
+        if (f == null) { MessageBox.Show(this, "RustDesk ещё не установлен — нажмите «Включить», он поставится первым шагом.", AppName); return; }
+        try { Process.Start(f); } catch (Exception ex) { MessageBox.Show(this, "RustDesk не открылся: " + ex.Message, AppName); }
+    }
+
+    // ID RustDesk — только номер, без пароля (пароль на фото не показываем, правило 3989)
+    void ReadRdId()
+    {
+        string id = "";
+        try
+        {
+            var toml = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), @"ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml");
+            if (File.Exists(toml)) { var m = Regex.Match(File.ReadAllText(toml), @"(?m)^id\s*=\s*'?""?(\d{6,12})"); if (m.Success) id = m.Groups[1].Value; }
+            var f = RdExe();
+            if (id == "" && f != null)
+            {
+                var p = Process.Start(new ProcessStartInfo(f, "--get-id") { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true });
+                if (p.WaitForExit(10000)) { var m = Regex.Match(p.StandardOutput.ReadToEnd(), @"\d{6,12}"); if (m.Success) id = m.Value; } else try { p.Kill(); } catch { }
+            }
+        }
+        catch { }
+        if (id == "") return;
+        id = Regex.Replace(id, @"(\d{3})(?=\d)", "$1 ");   // 123 456 789 — легче продиктовать
+        try { BeginInvoke(new Action(() => { rdId = id; pCompact.Invalidate(); })); } catch { }
     }
 
     static string Res(string name)

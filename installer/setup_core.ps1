@@ -268,21 +268,25 @@ if (-not ((Test-Path $g) -and ((Get-Content $g -Raw) -match '{{HOST_ALIAS}} ssh-
 $pub = (((Get-Content "$key.pub" -Raw).Trim()) -split ' ')[0..1] -join ' '
 
 Write-Host '5/7 Регистрация на сервере {{SRV_NAME}} и личный порт...' -ForegroundColor Cyan
-$base = "-p $SrvPort -o StrictHostKeyChecking=yes -o HostKeyAlias={{HOST_ALIAS}} -o HostKeyAlgorithms=ssh-ed25519,ecdsa-sha2-nistp256 -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20"
+$base = "-p $SrvPort -o StrictHostKeyChecking=yes -o HostKeyAlias={{HOST_ALIAS}} -o HostKeyAlgorithms=ssh-ed25519,ecdsa-sha2-nistp256 -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 -o CheckHostIP=no"  # CheckHostIP=no: ssh 7.7 сам пишет [IP]:порт ecdsa и потом падает «Host key verification failed» (180, 12521)
 # три способа указать файлы — ssh 7.7 и новые читают по-разному; рабочий запоминаем для задачи
 $ways = @(
     @{ kh = "-o UserKnownHostsFile=$D/known_hosts"; e = "$D/enroll_key"; t = "$D/tunnel_key" },
     @{ kh = ''; e = "$D/enroll_key"; t = "$D/tunnel_key" },
     @{ kh = "-o UserKnownHostsFile=`"$Dir\known_hosts`""; e = "`"$ek`""; t = "`"$key`"" })
 $ok = $null; $Port = $null; $ErrorActionPreference = 'Continue'
-foreach ($w in $ways) {
-    $out = cmd /c "`"$ssh`" -T $base $($w.kh) -i $($w.e) {{ENROLL_USER}}@$Srv `"$ph $pub $extra`" 2>&1"
-    $m = $out | Select-String 'PORT=(\d+)' | Select-Object -First 1
-    if ($m) { $ok = $w; $Port = $m.Matches[0].Groups[1].Value; break }
-    Write-Host "   способ «$($w.kh)» — нет: $(($out | Select-Object -Last 2) -join ' | ')" -ForegroundColor DarkYellow
+# сервер иногда рвёт соединение посреди обмена ключами («Connection reset», 180, 12521) — 4 круга с паузой
+for ($try = 1; $try -le 4 -and -not $Port; $try++) {
+    if ($try -gt 1) { Write-Host "   круг $try из 4 через 15 секунд..." -ForegroundColor DarkYellow; Start-Sleep 15 }
+    foreach ($w in $ways) {
+        $out = cmd /c "`"$ssh`" -T $base $($w.kh) -i $($w.e) {{ENROLL_USER}}@$Srv `"$ph $pub $extra`" 2>&1"
+        $m = $out | Select-String 'PORT=(\d+)' | Select-Object -First 1
+        if ($m) { $ok = $w; $Port = $m.Matches[0].Groups[1].Value; break }
+        Write-Host "   способ «$($w.kh)» — нет: $(($out | Select-Object -Last 2) -join ' | ')" -ForegroundColor DarkYellow
+    }
 }
 $ErrorActionPreference = 'Stop'
-if (-not $Port) { Write-Host '   Регистрация не прошла — пришлите текст этого окна.' -ForegroundColor Red; return }
+if (-not $Port) { Write-Host '   Регистрация не прошла — пришлите текст этого окна.' -ForegroundColor Red; exit 1 }   # код 1 — окно не пишет «Готово» (12521)
 $pt = "$Dir\port.txt"
 try { if (Test-Path $pt) { cmd /c "takeown /f `"$pt`" /a >nul 2>&1 & icacls `"$pt`" /reset >nul 2>&1 & attrib -r -h -s `"$pt`" >nul 2>&1"; Remove-Item $pt -Force }; [IO.File]::WriteAllText($pt, "$ph $Port $pcName`r`n") } catch { Write-Host "   port.txt не записан ($($_.Exception.Message)) — продолжаю" -ForegroundColor DarkYellow }
 Write-Host "   НОМЕР КЛИЕНТА: $Port" -ForegroundColor Green
