@@ -64,6 +64,7 @@ class MainForm : Form
     static readonly string SN = Pf.Get("srv_name", "поддержки"), HostAlias = Pf.Get("host_alias", "claude16");
     static readonly string TunnelUser = Pf.Get("tunnel_user", "claude_tunnel"), EnrollUser = Pf.Get("enroll_user", "claude_enroll");
     static readonly string Org = Pf.Get("org", "специалисты поддержки"), JournalName = Pf.Get("journal", "Журнал доступа Claude.txt");
+    static readonly string SourceUrl = Pf.Get("source_url", "https://github.com/89040617240mm21-a11y/tunnel-claude");   // открытый код: клиент сам видит, что делает программа
     static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ClaudeTunnel");
     static readonly string JournalPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), JournalName);
     static readonly object jlock = new object();
@@ -134,6 +135,13 @@ class MainForm : Form
         foreach (var c in new[] { Color.FromArgb(210, 40, 40), Color.FromArgb(30, 160, 60), Color.FromArgb(230, 160, 0), Color.Gray }) dots.Images.Add(Dot(c));
         lvChk = new ListView { Dock = DockStyle.Top, Height = 290, View = View.Details, FullRowSelect = true, HeaderStyle = ColumnHeaderStyle.Nonclickable, SmallImageList = dots, Font = new Font("Segoe UI", 12f) };
         lvChk.Columns.Add("Проверка", 300); lvChk.Columns.Add("Результат", 600);
+
+        // ссылка на открытый код — главная защита доверия: любой может проверить, что программа делает и чего не делает
+        var lnkSrc = new LinkLabel { Dock = DockStyle.Bottom, Height = 34, Font = new Font("Segoe UI", 11f), TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(10, 0, 0, 0),
+            Text = "Открытый код программы (проверить, что она делает): " + SourceUrl };
+        lnkSrc.LinkArea = new LinkArea(lnkSrc.Text.Length - SourceUrl.Length, SourceUrl.Length);
+        lnkSrc.LinkClicked += delegate { try { Process.Start(SourceUrl); } catch { } };
+        Controls.Add(lnkSrc);
 
         txtLog = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Font = new Font("Consolas", 10f), BackColor = Color.FromArgb(245, 245, 245) };
 
