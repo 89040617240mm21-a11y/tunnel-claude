@@ -439,7 +439,7 @@ class MainForm : Form
         {   // ID и пароль — одним снимком окна (Михаил, 12525–12527: пароль RustDesk можно и нужно в чат)
             var r1 = rdPw != "" ? new Rectangle(rRd.X, rRd.Y + 4, rRd.Width, 32) : rRd;
             Text3D(g, rdId != "" ? "RustDesk  ID " + rdId + "  ▸" : "RustDesk ▸ открыть", f, Brushes.White, r1, center);
-            if (rdPw != "") using (var br = new SolidBrush(Color.FromArgb(255, 222, 175))) Text3D(g, "пароль  " + rdPw, f, br, new Rectangle(rRd.X, rRd.Y + 34, rRd.Width, 32), center);
+            if (rdPw != "") using (var br = new SolidBrush(Color.FromArgb(255, 222, 175))) Text3D(g, "постоянный пароль  " + rdPw, f, br, new Rectangle(rRd.X, rRd.Y + 34, rRd.Width, 32), center);
         }
         using (var f = new Font("Segoe UI", 10.5f, FontStyle.Bold)) using (var br = new SolidBrush(Color.FromArgb(255, 222, 175)))
             Text3D(g, updText != "" ? updText : "⟳ Обновить · " + Rel, f, br, rUpd, center);
