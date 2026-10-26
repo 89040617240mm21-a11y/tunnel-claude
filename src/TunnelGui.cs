@@ -81,6 +81,8 @@ class MainForm : Form
     Button bOn, bOff, bFix, bShot, bCopy, bJournal;
     System.Windows.Forms.Timer tm; volatile bool checking, busy;
     Srv[] servers; Result last;
+    // компактный вид (Михаил, 12479): тумблер, номер для специалиста, 3 шага; «Подробно» — прежнее окно с таблицами
+    Panel pCompact, pToggle; Label lblCState, lblCCode, lblCSteps; Button bCCopy; LinkLabel lnkMore, lnkSrc; Control[] full; bool copied;
 
     public MainForm()
     {
@@ -137,7 +139,7 @@ class MainForm : Form
         lvChk.Columns.Add("Проверка", 300); lvChk.Columns.Add("Результат", 600);
 
         // ссылка на открытый код — главная защита доверия: любой может проверить, что программа делает и чего не делает
-        var lnkSrc = new LinkLabel { Dock = DockStyle.Bottom, Height = 34, Font = new Font("Segoe UI", 11f), TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(10, 0, 0, 0),
+        lnkSrc = new LinkLabel { Dock = DockStyle.Bottom, Height = 34, Font = new Font("Segoe UI", 11f), TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(10, 0, 0, 0),
             Text = "Открытый код программы (проверить, что она делает): " + SourceUrl };
         lnkSrc.LinkArea = new LinkArea(lnkSrc.Text.Length - SourceUrl.Length, SourceUrl.Length);
         lnkSrc.LinkClicked += delegate { try { Process.Start(SourceUrl); } catch { } };
@@ -146,6 +148,8 @@ class MainForm : Form
         txtLog = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Font = new Font("Consolas", 10f), BackColor = Color.FromArgb(245, 245, 245) };
 
         Controls.Add(txtLog); Controls.Add(lvChk); Controls.Add(lvSrv); Controls.Add(pBtn); Controls.Add(pPhone); Controls.Add(lblInfo); Controls.Add(lblStatus);
+        full = new Control[] { txtLog, lvChk, lvSrv, pBtn, pPhone, lblInfo, lblStatus };
+        BuildCompact();
 
         txtPhone.Text = GuessPhone();
         Log("Программа «Туннель Claude» " + Rel + ". Журнал входов: " + JournalPath);
@@ -155,6 +159,86 @@ class MainForm : Form
         Shown += delegate { StartCheck(); tm.Start(); };
         Resize += delegate { FitColumns(); };
         FitColumns();
+        SetMode(File.Exists(FullFlag) || Environment.GetCommandLineArgs().Contains("--full"));
+    }
+
+    void BuildCompact()
+    {
+        pCompact = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Visible = false };
+        pToggle = new Panel { Size = new Size(150, 150), Cursor = Cursors.Hand };
+        pToggle.Paint += (s, e) =>
+        {
+            var g = e.Graphics; g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            bool on = last != null && last.TaskSt > 0;
+            Color c = last == null || busy || !on ? Color.FromArgb(160, 160, 160) : last.Overall == 1 ? Color.FromArgb(25, 150, 60) : last.Overall == 2 ? Color.FromArgb(215, 140, 0) : Color.FromArgb(200, 35, 35);
+            using (var halo = new SolidBrush(Color.FromArgb(45, c))) g.FillEllipse(halo, 2, 2, 145, 145);
+            using (var b = new SolidBrush(c)) g.FillEllipse(b, 14, 14, 121, 121);
+            using (var pen = new Pen(Color.White, 9) { StartCap = System.Drawing.Drawing2D.LineCap.Round, EndCap = System.Drawing.Drawing2D.LineCap.Round })
+            { g.DrawArc(pen, 46, 48, 58, 58, -55, 290); g.DrawLine(pen, 75, 40, 75, 74); }   // значок питания
+        };
+        pToggle.Click += delegate { if (busy || last == null) return; if (last.TaskSt > 0 && last.Overall != 0) DoOff(); else DoOn(); };
+        new ToolTip().SetToolTip(pToggle, "Нажмите, чтобы включить или выключить доступ специалистов");
+        var lblOff = new Label { Text = "ВЫКЛ", AutoSize = true, Font = new Font("Segoe UI", 16f, FontStyle.Bold), ForeColor = Color.FromArgb(140, 140, 140) };
+        var lblOn = new Label { Text = "ВКЛ", AutoSize = true, Font = new Font("Segoe UI", 16f, FontStyle.Bold), ForeColor = Color.FromArgb(25, 150, 60) };
+        lblCState = new Label { TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Segoe UI", 17f, FontStyle.Bold), Text = "Проверяю..." };
+        lblCCode = new Label { TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Segoe UI", 32f, FontStyle.Bold) };
+        bCCopy = new Button { Text = "Скопировать номер для чата", FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(243, 243, 243), Font = new Font("Segoe UI", 12f) };
+        bCCopy.FlatAppearance.BorderColor = Color.FromArgb(205, 205, 205);
+        bCCopy.Click += delegate
+        {
+            if (last == null || last.Port == "") return;
+            try { Clipboard.SetText("Туннель Claude: номер " + last.Port + ", ПК " + Environment.MachineName); bCCopy.Text = "Скопировано — вставьте в чат (Ctrl+V)"; copied = true; } catch { }
+        };
+        lblCSteps = new Label { TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Segoe UI", 13f), ForeColor = Color.FromArgb(70, 70, 70) };
+        lnkMore = new LinkLabel { Text = "Подробно ▾", AutoSize = true, Font = new Font("Segoe UI", 12f) };
+        lnkMore.LinkClicked += delegate { SetMode(true); };
+        pCompact.Controls.AddRange(new Control[] { lblOff, pToggle, lblOn, lblCState, lblCCode, bCCopy, lblCSteps, lnkMore });
+        pCompact.Resize += delegate
+        {
+            int w = pCompact.ClientSize.Width, cx = w / 2;
+            pToggle.Location = new Point(cx - 75, 14);
+            lblOff.Location = new Point(cx - 95 - lblOff.Width, 89 - lblOff.Height / 2);
+            lblOn.Location = new Point(cx + 95, 89 - lblOn.Height / 2);
+            lblCState.SetBounds(10, 172, w - 20, 40); lblCCode.SetBounds(10, 212, w - 20, 64);
+            bCCopy.SetBounds(cx - 170, 282, 340, 44); lblCSteps.SetBounds(10, 336, w - 20, 40);
+            lnkMore.Location = new Point(cx - lnkMore.Width / 2, 380);
+        };
+        Controls.Add(pCompact); pCompact.BringToFront();
+
+        var bBack = Btn("Компактно ▴", Color.FromArgb(120, 120, 120), 140);   // из подробного вида — обратно
+        bBack.Click += delegate { SetMode(false); };
+        bJournal.Parent.Controls.Add(bBack);
+    }
+
+    void SetMode(bool isFull)
+    {
+        SuspendLayout();
+        foreach (var c in full) c.Visible = isFull;
+        pCompact.Visible = !isFull;
+        string url = isFull ? SourceUrl : SourceUrl.Replace("https://", "");
+        lnkSrc.Text = (isFull ? "Открытый код программы (проверить, что она делает): " : "Открытый код: ") + url;
+        lnkSrc.LinkArea = new LinkArea(lnkSrc.Text.Length - url.Length, url.Length);
+        lnkSrc.TextAlign = isFull ? ContentAlignment.MiddleLeft : ContentAlignment.MiddleCenter;
+        lnkSrc.Font = new Font("Segoe UI", isFull ? 11f : 9.5f);
+        if (isFull) { MinimumSize = new Size(760, 640); ClientSize = new Size(940, 860); }
+        else { MinimumSize = new Size(470, 470); ClientSize = new Size(500, 460); }
+        try { Directory.CreateDirectory(GuiDir); if (isFull) File.WriteAllText(FullFlag, "подробный вид"); else File.Delete(FullFlag); } catch { }
+        ResumeLayout(); FitColumns();
+        if (IsHandleCreated) CenterToScreen();
+    }
+
+    void ShowCompact(Result r)
+    {
+        bool on = r.TaskSt > 0;
+        Color[] cs = { Color.FromArgb(200, 35, 35), Color.FromArgb(25, 140, 55), Color.FromArgb(215, 140, 0), Color.FromArgb(110, 110, 110) };
+        lblCState.ForeColor = cs[r.Overall];
+        lblCState.Text = busy ? "Устанавливаю... подождите" : r.TaskSt == -1 ? "Не установлен — нажмите на круг" : !on ? "● Доступ выключен" : r.Overall == 1 ? "● В сети — доступ открыт" : r.Overall == 2 ? "● Почти готово — подключаюсь" : "● Нет связи — нажмите «Подробно»";
+        lblCCode.Text = on && r.Port != "" ? "Номер: " + r.Port : "";
+        bCCopy.Visible = on && r.Port != "";
+        if (copied) copied = false; else bCCopy.Text = "Скопировать номер для чата";   // «Скопировано» держится одну проверку (~5 с)
+        Func<string, string> mark = n => { var row = r.Rows.FirstOrDefault(x => x.Name.StartsWith(n)); return row == null || row.St == 3 ? "○" : row.St == 1 ? "✔" : row.St == 2 ? "…" : "✖"; };
+        lblCSteps.Text = mark("Связь с сервером") + " Интернет      " + mark("SSH отвечает") + " Вход      " + mark("Туннель до сервера") + " Канал";
+        pToggle.Invalidate();
     }
 
     void FitColumns()
@@ -477,6 +561,7 @@ class MainForm : Form
         bOn.Enabled = !busy && r.TaskSt != 1 && r.TaskSt != 2 || !busy && r.Overall == 0;
         bOff.Enabled = !busy && r.TaskSt > 0;
         bFix.Enabled = !busy;
+        ShowCompact(r);
         // лог на сервер: при запуске, после установки и кнопок, и когда статус стал красным (не чаще раза в 10 минут)
         if (!busy && prevOverall > 0 && r.Overall == 0 && (DateTime.Now - lastAuto).TotalMinutes >= 10) { pending = "статус стал красным"; lastAuto = DateTime.Now; }
         prevOverall = r.Overall;
@@ -486,6 +571,7 @@ class MainForm : Form
     // ---------- лог для специалистов на сервер (версия 102) ----------
     static readonly string GuiDir = Path.Combine(Dir, "gui");
     static readonly string NoLogFlag = Path.Combine(GuiDir, "nolog.flag");
+    static readonly string FullFlag = Path.Combine(GuiDir, "full.flag");   // есть — окно открывается в подробном виде
     static readonly string HostKeys = string.Join("", Pf.Sections("hostkeys").SelectMany(h => h.All("line")).Select(x => x + "\n"));
     static readonly object slock = new object();
     volatile string sendInfo = "ещё не отправлялся"; volatile int sendSt = 3;
