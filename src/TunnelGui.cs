@@ -226,26 +226,26 @@ class MainForm : Form
         }
         else using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(new Rectangle(0, 0, w, h), Color.FromArgb(lit ? 250 : 120, lit ? 150 : 110, lit ? 60 : 100), Color.FromArgb(40, 30, 28), 90f)) g.FillRectangle(lg, 0, 0, w, h);
 
-        var card = new RectangleF(40, h * 0.50f, w - 80, 214);
-        using (var p = Round(card, 18)) { using (var br = new SolidBrush(Color.FromArgb(150, 20, 16, 14))) g.FillPath(br, p); using (var pen = new Pen(Color.FromArgb(70, 255, 220, 170))) g.DrawPath(pen, p); }
+        var card = new RectangleF(w * 0.085f, h * 0.470f, w * 0.83f, h * 0.43f);   // там же, где карточка на наброске Б
+        using (var p = Round(card, 18)) { using (var br = new SolidBrush(Color.FromArgb(110, 30, 22, 18))) g.FillPath(br, p); using (var pen = new Pen(Color.FromArgb(90, 255, 225, 180), 1.5f)) g.DrawPath(pen, p); }
         var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
 
         Color[] dot = { Color.FromArgb(240, 70, 60), Color.FromArgb(80, 220, 100), Color.FromArgb(255, 190, 40), Color.FromArgb(170, 170, 170) };
         string head = last == null ? "Проверяю..." : busy ? "Устанавливаю..." : last.TaskSt == -1 ? "Не установлен" : !on ? AppName + " закрыт" : last.Overall == 1 ? AppName + " открыт" : last.Overall == 2 ? "Подключаюсь..." : "Нет связи";
         using (var f = new Font("Segoe UI", 24f, FontStyle.Bold))
         {
-            var sz = g.MeasureString(head, f); float x = (w - sz.Width - 26) / 2, y = card.Y + 16;
+            var sz = g.MeasureString(head, f); float x = (w - sz.Width - 26) / 2, y = card.Y + 20;
             using (var br = new SolidBrush(last == null ? dot[3] : busy ? dot[2] : !on ? dot[3] : dot[last.Overall])) g.FillEllipse(br, x, y + sz.Height / 2 - 9, 18, 18);
             g.DrawString(head, f, Brushes.White, x + 26, y);
         }
         string code = CodeShown ? "Номер: " + last.Port : last != null && last.TaskSt == -1 ? "нажмите «Включить»" : on ? "номер появится через минуту" : "специалисты не могут зайти";
-        rCode = new Rectangle((int)card.X, (int)card.Y + 64, (int)card.Width, 50);
-        using (var f = new Font("Segoe UI", CodeShown ? 24f : 14f, FontStyle.Bold)) g.DrawString(code, f, Brushes.White, rCode, center);
+        rCode = new Rectangle((int)card.X, (int)card.Y + 72, (int)card.Width, 56);
+        using (var f = new Font("Segoe UI", CodeShown ? 25f : 14f, FontStyle.Bold)) g.DrawString(code, f, Brushes.White, rCode, center);
         if (CodeShown && copied)
             using (var f = new Font("Segoe UI", 10.5f)) using (var br = new SolidBrush(Color.FromArgb(255, 215, 160)))
-                g.DrawString("Скопировано — вставьте в чат (Ctrl+V)", f, br, new RectangleF(card.X, card.Y + 110, card.Width, 22), center);
+                g.DrawString("Скопировано — вставьте в чат (Ctrl+V)", f, br, new RectangleF(card.X, card.Y + 124, card.Width, 22), center);
 
-        rBtn = new Rectangle((int)card.X + 28, (int)card.Y + 138, (int)card.Width - 56, 56);
+        rBtn = new Rectangle((int)card.X + 24, (int)(card.Bottom - 76), (int)card.Width - 48, 58);
         bool off = on && last.Overall != 0;
         using (var p = Round(rBtn, 14))
         using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(rBtn, Color.FromArgb(busy ? 150 : 255, busy ? 140 : 196, busy ? 130 : 80), Color.FromArgb(busy ? 110 : 226, busy ? 100 : 128, busy ? 95 : 20), 90f))
@@ -261,7 +261,7 @@ class MainForm : Form
 
         using (var f = new Font("Segoe UI", 11f, FontStyle.Underline)) using (var br = new SolidBrush(Color.FromArgb(255, 215, 160)))
         {
-            var sz = g.MeasureString("Подробно ▾", f); rMore = new Rectangle((int)(card.Right - sz.Width), (int)card.Bottom + 6, (int)sz.Width, (int)sz.Height);
+            var sz = g.MeasureString("Подробно ▾", f); rMore = new Rectangle((int)(card.Right - sz.Width), (int)card.Bottom + 8, (int)sz.Width, (int)sz.Height);
             g.DrawString("Подробно ▾", f, br, rMore.X, rMore.Y);
         }
     }
@@ -279,7 +279,7 @@ class MainForm : Form
         lnkSrc.BackColor = isFull ? Color.White : Color.FromArgb(28, 22, 20); lnkSrc.ForeColor = isFull ? SystemColors.ControlText : Color.FromArgb(200, 190, 180);
         lnkSrc.LinkColor = isFull ? Color.FromArgb(0, 102, 204) : Color.FromArgb(255, 215, 160);
         if (isFull) { MinimumSize = new Size(760, 640); ClientSize = new Size(940, 860); }
-        else { MinimumSize = new Size(420, 560); ClientSize = new Size(480, 650); }
+        else { MinimumSize = new Size(420, 560); ClientSize = new Size(480, 617); }
         try { Directory.CreateDirectory(GuiDir); if (isFull) File.WriteAllText(FullFlag, "подробный вид"); else File.Delete(FullFlag); } catch { }
         ResumeLayout(); FitColumns();
         if (IsHandleCreated) CenterToScreen();
