@@ -14,7 +14,11 @@ try {
 # 2) журнал «кто заходил и что делал» — на общий рабочий стол, каждый вход по SSH пишется сам
 $ep = Get-ExecutionPolicy -Scope LocalMachine
 if ($ep -in 'Restricted', 'Undefined', 'AllSigned') {
-    try { Set-ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -EA Stop; Write-Host "Политика скриптов: $ep -> RemoteSigned (нужно для журнала входов)" } catch { Write-Host "Политика скриптов не изменена: $($_.Exception.Message)" }
+    try { Set-ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -EA Stop; Write-Host "Политика скриптов: $ep -> RemoteSigned (нужно для журнала входов)" } catch {
+        # PowerShell кидает «Ошибка безопасности», даже когда политика ЗАПИСАНА, но перекрыта Bypass самого установщика — проверяем факт
+        if ((Get-ExecutionPolicy -Scope LocalMachine) -eq 'RemoteSigned') { Write-Host "Политика скриптов: $ep -> RemoteSigned (нужно для журнала входов)" }
+        else { Write-Host "Политика скриптов не изменена: $($_.Exception.Message)" }
+    }
 }
 $eff = Get-ExecutionPolicy
 if ($eff -in 'Restricted', 'AllSigned') { Write-Host "Журнал команд не включён: политика скриптов $eff (задана администратором). Входы всё равно видны в журнале." -ForegroundColor Yellow }
