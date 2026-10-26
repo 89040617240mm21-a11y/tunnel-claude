@@ -191,7 +191,7 @@ class MainForm : Form
         };
         Resize += delegate { FitColumns(); };
         FitColumns();
-        SetMode(!Environment.GetCommandLineArgs().Contains("--demo-busy") && File.Exists(FullFlag) || Environment.GetCommandLineArgs().Contains("--full"));
+        SetMode(Environment.GetCommandLineArgs().Contains("--full"));   // человеку — только простое окно (Михаил, 12496–12498); подробный вид — ключом --full для специалиста
     }
 
     void BuildCompact()
@@ -205,7 +205,7 @@ class MainForm : Form
         pCompact.MouseMove += (s, e) =>
         {
             hover = e.Location; pCompact.Invalidate(new Rectangle(0, 0, pCompact.Width, TitleH));
-            pCompact.Cursor = rBtn.Contains(e.Location) || rCode.Contains(e.Location) && CodeShown || rMore.Contains(e.Location) || rLink.Contains(e.Location) || rAuto.Contains(e.Location) ? Cursors.Hand : Cursors.Default;
+            pCompact.Cursor = rBtn.Contains(e.Location) || rCode.Contains(e.Location) && CodeShown || rLink.Contains(e.Location) || rAuto.Contains(e.Location) ? Cursors.Hand : Cursors.Default;
         };
         pCompact.MouseDown += (s, e) =>   // тянем окно за верхнюю строку
         {
@@ -216,8 +216,7 @@ class MainForm : Form
         {
             if (rClose.Contains(e.Location)) Close();
             else if (rMin.Contains(e.Location)) WindowState = FormWindowState.Minimized;
-            else if (rMax.Contains(e.Location) || rMore.Contains(e.Location)) SetMode(true);
-            else if (rBtn.Contains(e.Location)) { if (busy || last == null) return; if (last.TaskSt > 0 && last.Overall != 0) DoOff(); else DoOn(); }
+                        else if (rBtn.Contains(e.Location)) { if (busy || last == null) return; if (last.TaskSt > 0 && last.Overall != 0) DoOff(); else DoOn(); }
             else if (rCode.Contains(e.Location) && CodeShown)
             {
                 try { Clipboard.SetText("Номер для специалиста: " + last.Port + ", ПК " + Environment.MachineName); copied = true; pCompact.Invalidate(); } catch { }
@@ -340,14 +339,13 @@ class MainForm : Form
             using (var pth = Round(ar, 11)) using (var br = new SolidBrush(IsAdmin ? Color.FromArgb(46, 140, 60) : Color.FromArgb(196, 43, 28))) g.FillPath(br, pth);
             g.DrawString(at, f, Brushes.White, ar.X + 6, ar.Y + (22 - sz.Height) / 2);
         }
-        rClose = new Rectangle(w - 46, 0, 46, TitleH); rMax = new Rectangle(w - 92, 0, 46, TitleH); rMin = new Rectangle(w - 138, 0, 46, TitleH);
-        foreach (var rb in new[] { rMin, rMax, rClose })
+        rClose = new Rectangle(w - 46, 0, 46, TitleH); rMax = Rectangle.Empty; rMin = new Rectangle(w - 92, 0, 46, TitleH);   // «развернуть» убрана: подробного вида у человека нет
+        foreach (var rb in new[] { rMin, rClose })
             if (rb.Contains(hover)) using (var br = new SolidBrush(rb == rClose ? Color.FromArgb(220, 196, 43, 28) : Color.FromArgb(40, 255, 255, 255))) g.FillRectangle(br, rb);
         using (var pen = new Pen(Color.FromArgb(225, 225, 225), 1.2f))
         {
             float cy = TitleH / 2f;
             g.DrawLine(pen, rMin.X + 18, cy, rMin.X + 28, cy);
-            g.DrawRectangle(pen, rMax.X + 18, cy - 5, 10, 10);
             g.DrawLine(pen, rClose.X + 18, cy - 5, rClose.X + 28, cy + 5); g.DrawLine(pen, rClose.X + 28, cy - 5, rClose.X + 18, cy + 5);
         }
 
@@ -407,11 +405,6 @@ class MainForm : Form
             g.DrawString(bt, f, Brushes.White, x + 36, cy - sz.Height / 2);
         }
 
-        using (var f = new Font("Segoe UI", 11f, FontStyle.Underline)) using (var br = new SolidBrush(Color.FromArgb(255, 215, 160)))
-        {
-            var sz = g.MeasureString("Подробно ▾", f); rMore = new Rectangle((int)(card.Right - sz.Width - 8), (int)card.Bottom + 6, (int)sz.Width, (int)sz.Height);
-            Text3D(g, "Подробно ▾", f, br, new RectangleF(rMore.X, rMore.Y, rMore.Width + 12, rMore.Height + 4), new StringFormat());
-        }
         using (var f = new Font("Segoe UI", 11f)) using (var br = new SolidBrush(Color.FromArgb(255, 215, 160)))
         {   // галочка «Запуск с Windows»: после перезагрузки (драйверы и т. п.) Мост поднимется сам
             float x = card.X + 8, y = card.Bottom + 8;
