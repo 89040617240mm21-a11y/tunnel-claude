@@ -81,6 +81,10 @@ class MainForm : Form
     Label lblStatus, lblInfo, lblPhone; TextBox txtPhone, txtLog; ListView lvSrv, lvChk; CheckBox chkSend;
     Button bOn, bOff, bFix, bShot, bCopy, bJournal;
     System.Windows.Forms.Timer tm; volatile bool checking, busy;
+    // ход установки для компактного окна (Михаил, 12489): шаг N из 6, полоса до 100 %, последняя строка скрипта
+    static readonly string[] StepNames = { "запускаю установку", "SSH на этом ПК", "программа ssh", "личный ключ ПК", "регистрация на сервере", "задача автозапуска", "проверка связи" };
+    int stepN; string stepLine = ""; double prog, progShown; DateTime doneAt = DateTime.MinValue; bool doneOk; System.Windows.Forms.Timer anim;
+    bool ShowProg { get { return busy || (DateTime.Now - doneAt).TotalSeconds < 5; } }
     Srv[] servers; Result last;
     // компактный вид (Михаил, 12479): тумблер, номер для специалиста, 3 шага; «Подробно» — прежнее окно с таблицами
     Panel pCompact; LinkLabel lnkSrc; Control[] full; bool copiedFlag; DateTime copiedAt;
@@ -149,8 +153,10 @@ class MainForm : Form
 
         txtLog = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Font = new Font("Consolas", 10f), BackColor = Color.FromArgb(245, 245, 245) };
 
-        Controls.Add(txtLog); Controls.Add(lvChk); Controls.Add(lvSrv); Controls.Add(pBtn); Controls.Add(pPhone); Controls.Add(lblInfo); Controls.Add(lblStatus);
-        full = new Control[] { txtLog, lvChk, lvSrv, pBtn, pPhone, lblInfo, lblStatus };
+        // полоска над логом — тянуть мышью вверх, чтобы лог хода установки был больше (Михаил, 12490)
+        var split = new Splitter { Dock = DockStyle.Top, Height = 8, MinSize = 60, MinExtra = 80, BackColor = Color.FromArgb(214, 160, 90) };
+        Controls.Add(txtLog); Controls.Add(split); Controls.Add(lvChk); Controls.Add(lvSrv); Controls.Add(pBtn); Controls.Add(pPhone); Controls.Add(lblInfo); Controls.Add(lblStatus);
+        full = new Control[] { txtLog, split, lvChk, lvSrv, pBtn, pPhone, lblInfo, lblStatus };
         BuildCompact();
 
         txtPhone.Text = GuessPhone();
@@ -161,7 +167,7 @@ class MainForm : Form
         Shown += delegate { StartCheck(); tm.Start(); };
         Resize += delegate { FitColumns(); };
         FitColumns();
-        SetMode(File.Exists(FullFlag) || Environment.GetCommandLineArgs().Contains("--full"));
+        SetMode(!Environment.GetCommandLineArgs().Contains("--demo-busy") && File.Exists(FullFlag) || Environment.GetCommandLineArgs().Contains("--full"));
     }
 
     void BuildCompact()
@@ -254,6 +260,33 @@ class MainForm : Form
         g.DrawString(t, f, br, r, sf);
     }
 
+    void PaintProgress(Graphics g, RectangleF card, StringFormat center)
+    {   // «Шаг 3 из 6 · личный ключ ПК», под ней золотая полоса с процентами и последняя строка скрипта
+        bool done = !busy;
+        int pc = done && doneOk ? 100 : (int)Math.Round(Math.Min(progShown, 0.99) * 100);
+        string st = done ? (doneOk ? "Готово · шаг 6 из 6" : "Установка не закончена") : "Шаг " + Math.Max(stepN, 0) + " из 6 · " + StepNames[Math.Min(stepN, 6)];
+        using (var f = new Font("Segoe UI", 13.5f, FontStyle.Bold)) Text3D(g, st, f, Brushes.White, new RectangleF(card.X, card.Y + 64, card.Width, 28), center);
+        var tr = new RectangleF(card.X + 26, card.Y + 100, card.Width - 52 - 58, 16);
+        using (var p = Round(tr, 8))
+        {
+            using (var br = new SolidBrush(Color.FromArgb(120, 0, 0, 0))) g.FillPath(br, p);
+            using (var pen = new Pen(Color.FromArgb(70, 255, 236, 205))) g.DrawPath(pen, p);
+        }
+        float fw = tr.Width * pc / 100f;
+        if (fw >= 8)
+        {
+            var fr = new RectangleF(tr.X, tr.Y, fw, tr.Height);
+            Color c1 = done && !doneOk ? Color.FromArgb(250, 120, 100) : Color.FromArgb(255, 214, 110), c2 = done && !doneOk ? Color.FromArgb(190, 50, 40) : Color.FromArgb(222, 126, 18);
+            using (var p = Round(fr, 8)) using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(fr, c1, c2, 90f)) g.FillPath(lg, p);
+            var gl = new RectangleF(fr.X + 2, fr.Y + 1, Math.Max(fr.Width - 4, 1), fr.Height * 0.45f);
+            using (var p = Round(gl, 5)) using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(gl, Color.FromArgb(120, 255, 255, 255), Color.FromArgb(10, 255, 255, 255), 90f)) g.FillPath(lg, p);
+        }
+        using (var f = new Font("Segoe UI", 12.5f, FontStyle.Bold))
+            Text3D(g, pc + " %", f, Brushes.White, new RectangleF(tr.Right + 4, tr.Y - 6, 58, 28), new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center });
+        using (var f = new Font("Segoe UI", 9.5f)) using (var br = new SolidBrush(Color.FromArgb(255, 222, 180)))
+            g.DrawString(stepLine, f, br, new RectangleF(card.X + 16, card.Y + 122, card.Width - 32, 22), new StringFormat(center) { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap });
+    }
+
     void PaintCompact(Graphics g)
     {
         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias; g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
@@ -296,7 +329,7 @@ class MainForm : Form
         }
 
         Color[] dot = { Color.FromArgb(240, 70, 60), Color.FromArgb(90, 230, 90), Color.FromArgb(255, 190, 40), Color.FromArgb(170, 170, 170) };
-        string head = AppName + (lit ? " открыт" : " закрыт");   // только два слова: открыт / закрыт (Михаил, 12487), подробности — строкой ниже
+        string head = AppName + (busy ? " открывается" : lit ? " открыт" : " закрыт");   // только два слова: открыт / закрыт (Михаил, 12487), подробности — строкой ниже
         using (var f = new Font("Segoe UI", 24f, FontStyle.Bold))
         {
             var sz = g.MeasureString(head, f); float x = (w - sz.Width - 30) / 2, y = card.Y + 18, cy = y + sz.Height / 2;
@@ -311,8 +344,9 @@ class MainForm : Form
         }
         string code = last == null ? "проверяю..." : busy ? "подождите..." : lit && CodeShown ? "Номер: " + last.Port : !on ? "нажмите «Включить»" : last.Overall == 2 ? "подключаюсь..." : "нет связи — нажмите «Включить»";
         rCode = new Rectangle((int)card.X, (int)card.Y + 72, (int)card.Width, 56);
-        using (var f = new Font("Segoe UI", lit && CodeShown ? 25f : 14f, FontStyle.Bold)) Text3D(g, code, f, Brushes.White, rCode, center);
-        if (CodeShown && copied)
+        if (ShowProg) PaintProgress(g, card, center);
+        else using (var f = new Font("Segoe UI", lit && CodeShown ? 25f : 14f, FontStyle.Bold)) Text3D(g, code, f, Brushes.White, rCode, center);
+        if (!ShowProg && CodeShown && copied)
             using (var f = new Font("Segoe UI", 10.5f)) using (var br = new SolidBrush(Color.FromArgb(255, 215, 160)))
                 g.DrawString("Скопировано — вставьте в чат (Ctrl+V)", f, br, new RectangleF(card.X, card.Y + 124, card.Width, 22), center);
 
@@ -690,6 +724,7 @@ class MainForm : Form
 
     void Show(Result r)
     {
+        if (Environment.GetCommandLineArgs().Contains("--demo-busy") && !busy) { busy = true; stepN = 3; prog = progShown = 0.42; stepLine = "3/6 Личный ключ этого ПК..."; }   // снимок хода установки
         if (Environment.GetCommandLineArgs().Contains("--demo")) { r.TaskSt = 1; r.Overall = 1; r.Port = "22045"; }   // снимки для сайта: вид «открыт», ничего не включает
         last = r;
         Color[] cs = { Color.FromArgb(200, 35, 35), Color.FromArgb(25, 140, 55), Color.FromArgb(215, 140, 0), Color.FromArgb(110, 110, 110) };
@@ -907,10 +942,33 @@ class MainForm : Form
         StartCheck();
     }
 
+    void Progress(string s)
+    {
+        if (InvokeRequired) { try { BeginInvoke(new Action<string>(Progress), s); } catch { } return; }
+        var m = Regex.Match(s, @"^(\d)/6 ");
+        if (m.Success) { stepN = int.Parse(m.Groups[1].Value); prog = Math.Max(prog, (stepN - 1) / 6.0); }
+        var w = Regex.Match(s, @"\((\d+) с\)");
+        if (stepN == 6 && w.Success) prog = Math.Max(prog, 5 / 6.0 + Math.Min(0.9, int.Parse(w.Groups[1].Value) / 60.0) / 6);
+        string t = s.Trim(); if (t.Length > 0) stepLine = t.Length > 48 ? t.Substring(0, 47) + "…" : t;
+        if (pCompact != null) pCompact.Invalidate();
+    }
+    void AnimStart()
+    {   // полоса растёт плавно: внутри шага сама подползает к его концу, по строке скрипта — прыгает
+        if (anim == null) { anim = new System.Windows.Forms.Timer { Interval = 120 }; anim.Tick += (s, e) =>
+        {
+            if (busy) prog = Math.Min(Math.Max(prog, (stepN - 1) / 6.0) + 0.0012, stepN == 0 ? 0.04 : stepN / 6.0 - 0.012);
+            progShown += (prog - progShown) * 0.25;
+            if (!ShowProg) anim.Stop();
+            if (pCompact != null) pCompact.Invalidate();
+        }; }
+        anim.Start();
+    }
+
     void RunSetup(string why)
     {
         if (busy) return;
         busy = true; bOn.Enabled = bOff.Enabled = bFix.Enabled = false;
+        stepN = 0; prog = progShown = 0; stepLine = "займёт 1–3 минуты"; doneAt = DateTime.MinValue; AnimStart();
         string ph = Regex.Replace(txtPhone.Text, @"\D", "");
         Log(""); Log("=== " + DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss") + " установка туннеля (кнопка «" + why + "»), займёт 1–3 минуты...");
         Journal(null, "УСТАНОВКА", "клиент (кнопка «" + why + "»)", "этот ПК", "сотовый: " + (ph != "" ? ph : "не указан"));
@@ -922,12 +980,12 @@ class MainForm : Form
             { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true, StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 };
             psi.EnvironmentVariables["CLAUDE_PHONE"] = ph;
             var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
-            p.OutputDataReceived += (s, e) => { if (e.Data != null) { Log(e.Data); Journal(null, "  установка", "", "", e.Data); } };
+            p.OutputDataReceived += (s, e) => { if (e.Data != null) { Log(e.Data); Progress(e.Data); Journal(null, "  установка", "", "", e.Data); } };
             p.ErrorDataReceived += (s, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) { Log("ОШИБКА: " + e.Data); Journal(null, "  установка", "", "", "ОШИБКА: " + e.Data); } };
-            p.Exited += (s, e) => { try { BeginInvoke(new Action(() => { busy = false; bFix.Enabled = true; Log("=== установка закончена. Смотрите статус вверху окна."); try { File.Delete(tmp); } catch { } pending = "установка (кнопка «" + why + "»), код выхода " + p.ExitCode; StartCheck(); })); } catch { } };
+            p.Exited += (s, e) => { try { BeginInvoke(new Action(() => { busy = false; bFix.Enabled = true; doneOk = p.ExitCode == 0; doneAt = DateTime.Now; prog = 1; stepLine = doneOk ? "все 6 шагов пройдены" : "ошибка — нажмите «Подробно»"; Log("=== установка закончена. Смотрите статус вверху окна."); try { File.Delete(tmp); } catch { } pending = "установка (кнопка «" + why + "»), код выхода " + p.ExitCode; StartCheck(); })); } catch { } };
             p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
         }
-        catch (Exception ex) { busy = false; bFix.Enabled = true; Log("Не запустилась установка: " + ex.Message); }
+        catch (Exception ex) { busy = false; bFix.Enabled = true; doneOk = false; doneAt = DateTime.Now; stepLine = "установка не запустилась"; Log("Не запустилась установка: " + ex.Message); }
     }
 
     static string Res(string name)
