@@ -40,6 +40,63 @@ $tr = @{ 'а'='a';'б'='b';'в'='v';'г'='g';'д'='d';'е'='e';'ё'='e';'ж'='zh
 $pcName = -join ($env:COMPUTERNAME.ToCharArray() | ForEach-Object { $s = "$_"; $l = $s.ToLower(); if ($tr.ContainsKey($l)) { if ($s -cne $l) { $tr[$l].ToUpper() } else { $tr[$l] } } else { $s } })
 $pcName = ($pcName -replace '[^A-Za-z0-9._-]', '_'); if ($pcName.Length -gt 40) { $pcName = $pcName.Substring(0, 40) }
 if (-not $pcName) { $pcName = 'PC' }
+# 1/7 RustDesk (Михаил, 12503): официальный подписанный RustDesk, тихая установка, наш сервер связи; ID уходит на сервер при регистрации (шаг 5)
+#   Без удаления и без пароля: подключение только по ID, «Принять» нажимает человек. В профиле нет rustdesk_url — шаг пропускается.
+$rdUrl = '{{RD_URL}}'; $rdSha = '{{RD_SHA}}'; $rdHost = '{{RD_HOST}}'; $rdRelay = '{{RD_RELAY}}'; $rdKey = '{{RD_KEY}}'; $rdCfg = '{{RD_CFG}}'
+Write-Host '1/7 Удалённый помощник RustDesk...' -ForegroundColor Cyan
+$rdExe0 = "$env:ProgramFiles\RustDesk\rustdesk.exe"
+if (-not $rdUrl) { Write-Host '   в этой сборке RustDesk не задан — пропускаю' }
+else {
+  try {
+    if (-not (Test-Path $rdExe0)) {
+        $rdTmp = "$env:SystemRoot\Temp\claude_rd"; New-Item -ItemType Directory -Force $rdTmp | Out-Null
+        $rdF = "$rdTmp\rustdesk-setup.exe"; $got = $false
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        foreach ($u in ($rdUrl -split '\|')) {
+            if ($got -or -not $u) { continue }
+            Write-Host "   скачиваю: $u"
+            try { (New-Object Net.WebClient).DownloadFile($u, $rdF) } catch { Write-Host "   не скачалось: $($_.Exception.Message)" -ForegroundColor DarkYellow; continue }
+            $h = (Get-FileHash $rdF -Algorithm SHA256).Hash.ToLower(); $sg = Get-AuthenticodeSignature $rdF
+            if ($rdSha -and $h -ne $rdSha.ToLower()) { Write-Host "   контрольная сумма не совпала ($h) — файл не запускаю" -ForegroundColor Red; Remove-Item $rdF -EA 0; continue }
+            if ($sg.Status -ne 'Valid' -or $sg.SignerCertificate.Subject -notlike '*PURSLANE*') { Write-Host "   подпись не RustDesk ($($sg.Status)) — файл не запускаю" -ForegroundColor Red; Remove-Item $rdF -EA 0; continue }
+            $got = $true
+        }
+        if ($got) {
+            Write-Host '   подпись RustDesk и контрольная сумма верны — ставлю тихо (до 2 минут)'
+            Start-Process $rdF -ArgumentList '--silent-install' -WindowStyle Hidden
+            for ($i = 0; $i -lt 40 -and -not ((Test-Path $rdExe0) -and (Get-Service RustDesk -EA 0)); $i++) { Start-Sleep 3 }
+            Start-Sleep 5
+        }
+    } else { Write-Host '   RustDesk уже установлен' }
+    if ((Test-Path $rdExe0) -and $rdHost) {
+        $rdToml = 'C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk2.toml'
+        $rdOk = { (Test-Path $rdToml) -and ((Get-Content $rdToml -Raw -Encoding UTF8) -match [regex]::Escape("custom-rendezvous-server = '$rdHost'")) }
+        if (-not (& $rdOk)) {
+            if ($rdCfg) { cmd.exe /c "`"$rdExe0`" --config $rdCfg" | Out-Null; Start-Sleep 4 }
+            if (-not (& $rdOk)) {
+                # служба на свежем ПК не берёт сервер из --config («Empty source config, skipped») — дописываем в её конфиг сами, копия рядом
+                sc.exe stop RustDesk | Out-Null; Start-Sleep 5
+                Get-Process rustdesk -EA 0 | Where-Object { $_.SessionId -eq 0 } | Stop-Process -Force -EA 0
+                $ls = @(); if (Test-Path $rdToml) { Copy-Item $rdToml ($rdToml + '.bak_' + (Get-Date -Format 'yyyyMMdd-HHmmss')); $ls = [IO.File]::ReadAllLines($rdToml) }
+                $new = @("custom-rendezvous-server = '$rdHost'", "relay-server = '$rdRelay'", "key = '$rdKey'")
+                $out = New-Object Collections.Generic.List[string]; $inOpt = $false; $done = $false
+                foreach ($l in $ls) {
+                    if ($l -match '^\s*\[') { $inOpt = ($l.Trim() -eq '[options]') }
+                    if ($inOpt -and $l -match '^\s*(custom-rendezvous-server|relay-server|key)\s*=') { continue }
+                    $out.Add($l)
+                    if ($l.Trim() -eq '[options]' -and -not $done) { $new | ForEach-Object { $out.Add($_) }; $done = $true }
+                }
+                if (-not $done) { $out.Add(''); $out.Add('[options]'); $new | ForEach-Object { $out.Add($_) } }
+                New-Item -ItemType Directory -Force (Split-Path $rdToml) | Out-Null
+                [IO.File]::WriteAllLines($rdToml, $out, (New-Object Text.UTF8Encoding($false)))
+                sc.exe start RustDesk | Out-Null; Start-Sleep 6
+            }
+        }
+        Write-Host "   сервер связи RustDesk: $(if (& $rdOk) { $rdHost } else { 'не прописан — специалист поправит' })"
+    }
+    if (-not (Test-Path $rdExe0)) { Write-Host '   RustDesk не установился — продолжаю без него' -ForegroundColor DarkYellow }
+  } catch { Write-Host "   RustDesk: $($_.Exception.Message) — продолжаю без него" -ForegroundColor DarkYellow }
+}
 # ID RustDesk, если стоит (для справки; ждём не больше 15 с)
 $rdId = ''
 $rdExe = @("$env:ProgramFiles\RustDesk\rustdesk.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -47,7 +104,7 @@ if ($rdExe) { try { $j = Start-Job { param($e) & $e --get-id 2>$null } -Argument
 $extra = "pc=$pcName"; if ($rdId -match '^\d{6,12}$') { $extra += " rd=$rdId" }
 Write-Host "ПК: $pcName   RustDesk: $(if ($rdId) { $rdId } else { 'нет' })   сотовый: $(if ($ph -ne '0') { $ph } else { 'привяжем потом' })"
 
-Write-Host '1/6 SSH на этом ПК (вход только по ключу Claude)...' -ForegroundColor Cyan
+Write-Host '2/7 SSH на этом ПК (вход только по ключу Claude)...' -ForegroundColor Cyan
 $ak = "$env:ProgramData\ssh\administrators_authorized_keys"
 if (-not (Get-Service sshd -EA 0)) {
     # РЕЛИЗ 8: SSH нет — ставим сразу из НАШЕЙ копии установщика Microsoft на сервер: не зависит от обновлений Windows и GitHub
@@ -169,13 +226,13 @@ if ($bn -notmatch '^SSH-2\.0') {
     Write-Host '   Продолжаю: номер клиента всё равно получим, вход починим потом.' -ForegroundColor DarkYellow
 } else { Write-Host "   SSH работает ($bn)" }
 
-Write-Host '2/6 Программа ssh...' -ForegroundColor Cyan
+Write-Host '3/7 Программа ssh...' -ForegroundColor Cyan
 $ssh = @("$env:ProgramFiles\OpenSSH\ssh.exe", "$env:SystemRoot\System32\OpenSSH\ssh.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $ssh) { Write-Host '   ssh.exe не найден.' -ForegroundColor Red; return }
 $kg = Join-Path (Split-Path $ssh) 'ssh-keygen.exe'
 Write-Host "   $ssh"
 
-Write-Host '3/6 Личный ключ этого ПК...' -ForegroundColor Cyan
+Write-Host '4/7 Личный ключ этого ПК...' -ForegroundColor Cyan
 New-Item -ItemType Directory -Force $Dir | Out-Null
 Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" | Where-Object { $_.CommandLine -like '*ClaudeTunnel*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA 0 }
 $key = "$Dir\tunnel_key"; $ek = "$Dir\enroll_key"
@@ -210,7 +267,7 @@ $g = "$env:ProgramData\ssh\ssh_known_hosts"     # общий файл довер
 if (-not ((Test-Path $g) -and ((Get-Content $g -Raw) -match '{{HOST_ALIAS}} ssh-ed25519'))) { [IO.File]::AppendAllText($g, $hk) }
 $pub = (((Get-Content "$key.pub" -Raw).Trim()) -split ' ')[0..1] -join ' '
 
-Write-Host '4/6 Регистрация на сервере {{SRV_NAME}} и личный порт...' -ForegroundColor Cyan
+Write-Host '5/7 Регистрация на сервере {{SRV_NAME}} и личный порт...' -ForegroundColor Cyan
 $base = "-p $SrvPort -o StrictHostKeyChecking=yes -o HostKeyAlias={{HOST_ALIAS}} -o HostKeyAlgorithms=ssh-ed25519,ecdsa-sha2-nistp256 -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20"
 # три способа указать файлы — ssh 7.7 и новые читают по-разному; рабочий запоминаем для задачи
 $ways = @(
@@ -230,7 +287,7 @@ $pt = "$Dir\port.txt"
 try { if (Test-Path $pt) { cmd /c "takeown /f `"$pt`" /a >nul 2>&1 & icacls `"$pt`" /reset >nul 2>&1 & attrib -r -h -s `"$pt`" >nul 2>&1"; Remove-Item $pt -Force }; [IO.File]::WriteAllText($pt, "$ph $Port $pcName`r`n") } catch { Write-Host "   port.txt не записан ($($_.Exception.Message)) — продолжаю" -ForegroundColor DarkYellow }
 Write-Host "   НОМЕР КЛИЕНТА: $Port" -ForegroundColor Green
 
-Write-Host '5/6 Задача «Claude туннель» (от SYSTEM, при включении ПК и каждую минуту, если оборвался)...' -ForegroundColor Cyan
+Write-Host '6/7 Задача «Claude туннель» (от SYSTEM, при включении ПК и каждую минуту, если оборвался)...' -ForegroundColor Cyan
 $targ = "-N -T $base $($ok.kh) -i $($ok.t) -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -E $D/ssh.log -R 127.0.0.1:${Port}:127.0.0.1:22 {{TUNNEL_USER}}@$Srv"
 $act = New-ScheduledTaskAction -Execute $ssh -Argument $targ
 $trg = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1)))
@@ -240,7 +297,7 @@ Register-ScheduledTask -TaskName '{{TASK_NAME}}' -Action $act -Trigger $trg -Set
 Remove-Item "$Dir\ssh.log" -EA 0
 Start-ScheduledTask -TaskName '{{TASK_NAME}}'
 
-Write-Host '6/6 Проверка (сервер вписывает новый ключ до 1 минуты)...' -ForegroundColor Cyan
+Write-Host '7/7 Проверка (сервер вписывает новый ключ до 1 минуты)...' -ForegroundColor Cyan
 $desk = [Environment]::GetFolderPath('Desktop')
 Get-ChildItem $desk -Filter 'Туннель Claude*.ps1' -EA 0 | Remove-Item -EA 0
 $up = $false

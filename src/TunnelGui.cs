@@ -85,8 +85,8 @@ class MainForm : Form
     Label lblStatus, lblInfo, lblPhone; TextBox txtPhone, txtLog; ListView lvSrv, lvChk; CheckBox chkSend;
     Button bOn, bOff, bFix, bShot, bCopy, bJournal;
     System.Windows.Forms.Timer tm; volatile bool checking, busy;
-    // ход установки для компактного окна (Михаил, 12489): шаг N из 6, полоса до 100 %, последняя строка скрипта
-    static readonly string[] StepNames = { "запускаю установку", "SSH на этом ПК", "программа ssh", "личный ключ ПК", "регистрация на сервере", "задача автозапуска", "проверка связи" };
+    // ход установки для компактного окна (Михаил, 12489): шаг N из 7, полоса до 100 % (первый шаг — RustDesk, 12503), последняя строка скрипта
+    static readonly string[] StepNames = { "запускаю установку", "RustDesk", "SSH на этом ПК", "программа ssh", "личный ключ ПК", "регистрация на сервере", "задача автозапуска", "проверка связи" };
     int stepN; string stepLine = ""; double prog, progShown; DateTime doneAt = DateTime.MinValue; bool doneOk; System.Windows.Forms.Timer anim;
     static readonly bool IsAdmin = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
     static bool Demo { get { return Environment.GetCommandLineArgs().Any(a => a.StartsWith("--demo")); } }
@@ -285,10 +285,10 @@ class MainForm : Form
     }
 
     void PaintProgress(Graphics g, RectangleF card, StringFormat center)
-    {   // «Шаг 3 из 6 · личный ключ ПК», под ней золотая полоса с процентами и последняя строка скрипта
+    {   // «Шаг 4 из 7 · личный ключ ПК», под ней золотая полоса с процентами и последняя строка скрипта
         bool done = !busy;
         int pc = done && doneOk ? 100 : (int)Math.Round(Math.Min(progShown, 0.99) * 100);
-        string st = done ? (doneOk ? "Готово · шаг 6 из 6" : "Установка не закончена") : "Шаг " + Math.Max(stepN, 0) + " из 6 · " + StepNames[Math.Min(stepN, 6)];
+        string st = done ? (doneOk ? "Готово · шаг 7 из 7" : "Установка не закончена") : "Шаг " + Math.Max(stepN, 0) + " из 7 · " + StepNames[Math.Min(stepN, 7)];
         using (var f = new Font("Segoe UI", 13.5f, FontStyle.Bold)) Text3D(g, st, f, Brushes.White, new RectangleF(card.X, card.Y + 64, card.Width, 28), center);
         var tr = new RectangleF(card.X + 26, card.Y + 100, card.Width - 52 - 58, 16);
         using (var p = Round(tr, 8))
@@ -761,7 +761,7 @@ class MainForm : Form
 
     void Show(Result r)
     {
-        if (Environment.GetCommandLineArgs().Contains("--demo-busy") && !busy) { busy = true; stepN = 3; prog = progShown = 0.42; stepLine = "3/6 Личный ключ этого ПК..."; }   // снимок хода установки
+        if (Environment.GetCommandLineArgs().Contains("--demo-busy") && !busy) { busy = true; stepN = 4; prog = progShown = 0.48; stepLine = "4/7 Личный ключ этого ПК..."; }   // снимок хода установки
         if (Environment.GetCommandLineArgs().Contains("--demo")) { r.TaskSt = 1; r.Overall = 1; r.Port = "22045"; }   // снимки для сайта: вид «открыт», ничего не включает
         last = r;
         if (!autoTried)
@@ -1036,10 +1036,10 @@ class MainForm : Form
     void Progress(string s)
     {
         if (InvokeRequired) { try { BeginInvoke(new Action<string>(Progress), s); } catch { } return; }
-        var m = Regex.Match(s, @"^(\d)/6 ");
-        if (m.Success) { stepN = int.Parse(m.Groups[1].Value); prog = Math.Max(prog, (stepN - 1) / 6.0); }
+        var m = Regex.Match(s, @"^(\d)/7 ");
+        if (m.Success) { stepN = int.Parse(m.Groups[1].Value); prog = Math.Max(prog, (stepN - 1) / 7.0); }
         var w = Regex.Match(s, @"\((\d+) с\)");
-        if (stepN == 6 && w.Success) prog = Math.Max(prog, 5 / 6.0 + Math.Min(0.9, int.Parse(w.Groups[1].Value) / 60.0) / 6);
+        if (stepN == 7 && w.Success) prog = Math.Max(prog, 6 / 7.0 + Math.Min(0.9, int.Parse(w.Groups[1].Value) / 60.0) / 7);
         string t = s.Trim(); if (t.Length > 0) stepLine = t.Length > 48 ? t.Substring(0, 47) + "…" : t;
         if (pCompact != null) pCompact.Invalidate();
     }
@@ -1047,7 +1047,7 @@ class MainForm : Form
     {   // полоса растёт плавно: внутри шага сама подползает к его концу, по строке скрипта — прыгает
         if (anim == null) { anim = new System.Windows.Forms.Timer { Interval = 120 }; anim.Tick += (s, e) =>
         {
-            if (busy) prog = Math.Min(Math.Max(prog, (stepN - 1) / 6.0) + 0.0012, stepN == 0 ? 0.04 : stepN / 6.0 - 0.012);
+            if (busy) prog = Math.Min(Math.Max(prog, (stepN - 1) / 7.0) + 0.0012, stepN == 0 ? 0.04 : stepN / 7.0 - 0.012);
             progShown += (prog - progShown) * 0.25;
             if (!ShowProg) anim.Stop();
             if (pCompact != null) pCompact.Invalidate();

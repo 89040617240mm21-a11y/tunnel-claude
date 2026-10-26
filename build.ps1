@@ -38,6 +38,8 @@ $map = @{
     TASK_NAME = Q (M 'task_name' 'Claude туннель'); JOURNAL = M 'journal' 'Журнал доступа Claude.txt'
     FILES_URL = Q (M 'files_url'); SSH_FALLBACK_URL = Q (M 'ssh_fallback_url'); ENROLL_KEY = $enrollKey
     HOSTKEYS = $hostkeys; ALLOW_IPS = ($allow -join ', '); FROM_MAP = ($from -join '; ')
+    RD_URL = Q (M 'rustdesk_url'); RD_SHA = M 'rustdesk_sha256'; RD_HOST = Q (M 'rustdesk_host'); RD_RELAY = Q (M 'rustdesk_relay')
+    RD_KEY = Q (M 'rustdesk_key'); RD_CFG = Q (M 'rustdesk_config')   # RustDesk первым шагом (12503); пусто — шаг пропускается
 }
 
 New-Item -ItemType Directory -Force obj | Out-Null
