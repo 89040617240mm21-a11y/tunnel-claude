@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Туннель Claude</title>
+<meta name="description" content="Проверка ПК на вирусы Защитником Windows без удаления и безопасный обратный SSH-туннель для обслуживания 1С. Открытый код, MIT.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%23198c37'/%3E%3Cpath d='M14 54V38a18 20 0 0 1 36 0v16' fill='none' stroke='white' stroke-width='7'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f7f8f6; --card: #ffffff; --text: #17201a; --muted: #4c5a50; --line: #d9e0da;
+  --green: #198c37; --green-ink: #ffffff; --red: #c62828; --accent-bg: #e7f4ea;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1411; --card: #172019; --text: #e8efe9; --muted: #a9b8ad; --line: #2b372e;
+    --green: #2fb257; --green-ink: #06140a; --red: #ef5350; --accent-bg: #173322;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1411; --card: #172019; --text: #e8efe9; --muted: #a9b8ad; --line: #2b372e;
+  --green: #2fb257; --green-ink: #06140a; --red: #ef5350; --accent-bg: #173322;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 20px/1.55 "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+}
+.wrap { max-width: 980px; margin: 0 auto; padding: 0 16px; }
+header { padding: 48px 0 24px; }
+.logo { display: flex; align-items: center; gap: 14px; font-weight: 700; font-size: 24px; }
+.logo svg { width: 48px; height: 48px; flex: none; }
+h1 { font-size: clamp(32px, 6vw, 52px); line-height: 1.15; margin: 24px 0 16px; }
+.lead { font-size: clamp(20px, 2.6vw, 24px); color: var(--muted); margin: 0 0 28px; max-width: 46em; }
+.btns { display: flex; flex-wrap: wrap; gap: 14px; }
+.btn {
+  display: inline-block; padding: 16px 28px; border-radius: 12px; font-weight: 700; font-size: 20px;
+  text-decoration: none; border: 2px solid var(--green);
+}
+.btn.main { background: var(--green); color: var(--green-ink); }
+.btn.alt { color: var(--green); background: transparent; }
+.btn:focus-visible { outline: 3px solid var(--text); outline-offset: 3px; }
+section { padding: 28px 0; }
+h2 { font-size: clamp(26px, 4vw, 34px); margin: 0 0 18px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 22px; }
+.card h3 { margin: 0 0 8px; font-size: 22px; }
+.card p { margin: 0; color: var(--muted); }
+.scheme { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 12px; }
+.scheme svg { width: 100%; height: auto; display: block; }
+.scheme text { font-family: inherit; }
+ol, ul { padding-left: 1.3em; }
+li { margin: 6px 0; }
+code { background: var(--accent-bg); padding: 2px 6px; border-radius: 6px; font-size: 0.9em; word-break: break-word; }
+.contact {
+  background: var(--accent-bg); border-radius: 16px; padding: 24px; font-size: clamp(20px, 3vw, 26px); font-weight: 700;
+}
+.contact .phone { white-space: nowrap; }
+.road li b { color: var(--green); }
+footer { padding: 32px 0 48px; color: var(--muted); font-size: 18px; }
+footer a, section a { color: var(--green); }
+.theme { float: right; background: none; border: 1px solid var(--line); color: var(--text); border-radius: 10px; padding: 8px 12px; font-size: 18px; cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <button class="theme" id="theme" type="button" aria-label="Сменить тему">◐ Тема</button>
+  <div class="logo">
+    <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="30" fill="#198c37"/><path d="M14 54V38a18 20 0 0 1 36 0v16" fill="none" stroke="#fff" stroke-width="7"/></svg>
+    Туннель Claude
+  </div>
+  <h1>Антивирус для ПК и безопасный туннель для обслуживания 1С</h1>
+  <p class="lead">Одна программа для двух задач. Она проверяет компьютер встроенным Защитником Windows: ничего не удаляет, только даёт отчёт. И даёт специалисту безопасно зайти, чтобы обслужить 1С. Клиент сам включает и выключает доступ, каждый вход записывается в журнал. Код открыт.</p>
+  <div class="btns">
+    <a class="btn main" href="https://github.com/89040617240mm21-a11y/tunnel-claude/releases">⬇ Скачать</a>
+    <a class="btn alt" href="https://github.com/89040617240mm21-a11y/tunnel-claude">Исходный код</a>
+  </div>
+</header>
+
+<section>
+  <h2>Как это работает</h2>
+  <div class="scheme">
+    <svg viewBox="0 0 900 330" role="img" aria-label="Схема: ПК клиента держит исходящее соединение с сервером поддержки, специалист входит через сервер по ключу">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--green)"/></marker>
+      </defs>
+      <rect x="20" y="70" width="240" height="150" rx="18" fill="var(--accent-bg)" stroke="var(--green)" stroke-width="3"/>
+      <text x="140" y="120" text-anchor="middle" font-size="26" font-weight="700" fill="var(--text)">ПК клиента</text>
+      <text x="140" y="156" text-anchor="middle" font-size="19" fill="var(--muted)">Защитник: отчёт</text>
+      <text x="140" y="184" text-anchor="middle" font-size="19" fill="var(--muted)">без удаления</text>
+      <rect x="330" y="70" width="240" height="150" rx="18" fill="var(--card)" stroke="var(--line)" stroke-width="3"/>
+      <text x="450" y="128" text-anchor="middle" font-size="26" font-weight="700" fill="var(--text)">Сервер</text>
+      <text x="450" y="162" text-anchor="middle" font-size="26" font-weight="700" fill="var(--text)">поддержки</text>
+      <rect x="640" y="70" width="240" height="150" rx="18" fill="var(--card)" stroke="var(--line)" stroke-width="3"/>
+      <text x="760" y="128" text-anchor="middle" font-size="26" font-weight="700" fill="var(--text)">Специалист</text>
+      <text x="760" y="162" text-anchor="middle" font-size="26" font-weight="700" fill="var(--text)">1С</text>
+      <line x1="262" y1="145" x2="326" y2="145" stroke="var(--green)" stroke-width="5" marker-end="url(#ar)"/>
+      <line x1="638" y1="145" x2="574" y2="145" stroke="var(--green)" stroke-width="5" marker-end="url(#ar)"/>
+      <text x="294" y="48" text-anchor="middle" font-size="19" fill="var(--text)">исходящий SSH</text>
+      <text x="606" y="48" text-anchor="middle" font-size="19" fill="var(--text)">вход по ключу</text>
+      <text x="450" y="280" text-anchor="middle" font-size="21" fill="var(--text)">На роутере ничего не открываем · клиент сам жмёт ВКЛ / ВЫКЛ</text>
+      <text x="450" y="312" text-anchor="middle" font-size="21" fill="var(--muted)">Журнал на рабочем столе: кто, когда, откуда, что делал</text>
+    </svg>
+  </div>
+</section>
+
+<section>
+  <h2>Что умеет</h2>
+  <div class="grid">
+    <div class="card"><h3>🛡 Проверка на вирусы</h3><p>Защитник Windows проверяет ПК фоном, даже после перезагрузки. Ничего не удаляет и не трогает, только составляет список находок.</p></div>
+    <div class="card"><h3>🔒 Туннель без открытых портов</h3><p>ПК сам соединяется с сервером. Внешний IP может меняться, роутер настраивать не нужно.</p></div>
+    <div class="card"><h3>🟢 Клиент решает сам</h3><p>Большие кнопки ВКЛЮЧИТЬ / ВЫКЛЮЧИТЬ / ПОЧИНИТЬ и понятный статус: работает или нет и почему.</p></div>
+    <div class="card"><h3>📒 Всё в журнале</h3><p>Каждый вход записывается в файл на рабочем столе. Его поймёт и человек, и любой ИИ.</p></div>
+    <div class="card"><h3>🔑 Только по ключу</h3><p>Пароли выключены. Ключ каждого ПК открывает только свой порт на сервере, и больше ничего.</p></div>
+    <div class="card"><h3>🧰 Чинит себя</h3><p>Сам ставит OpenSSH и исправляет права на ключи. Знает про 360 Total Security и ПК без DNS.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>Дорожная карта</h2>
+  <ul class="road">
+    <li><b>Версия 102</b> — сейчас: туннель, проверка Защитником, журнал, лог ошибок специалистам.</li>
+    <li><b>Версия 103</b> — паспорт ПК (железо, Windows, 1С, диски) и антивирусный отчёт прямо в окне.</li>
+    <li><b>Дальше</b> — Windows 7 и XP, обновления программы с сайта.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Для программистов: свой сервер за 15 минут</h2>
+  <ol>
+    <li>Поднимите сервер по <a href="https://github.com/89040617240mm21-a11y/tunnel-claude/blob/main/server/README.md">инструкции</a>: отдельная служба <code>sshd_tunnel</code>, пользователи <code>claude_tunnel</code> и <code>claude_enroll</code>.</li>
+    <li>Скопируйте <code>profile.example.ini</code> в <code>profile.ini</code>. Впишите свой сервер, отпечаток сервера и ключи специалистов.</li>
+    <li>Соберите программу командой <code>powershell -File build.ps1</code>. Нужен только .NET 4, он есть в Windows 10/11.</li>
+  </ol>
+  <p>Лицензия MIT: пользуйтесь, меняйте, раздавайте своим клиентам.</p>
+</section>
+
+<section>
+  <div class="contact">WhatsApp / MAX / Телеграм <span class="phone">+7 904 061-72-40</span>, 24/7</div>
+</section>
+
+<footer>MIT © 2026 Mikhail Novikov · <a href="https://github.com/89040617240mm21-a11y/tunnel-claude">GitHub</a></footer>
+</div>
+<script>
+(function () {
+  var b = document.getElementById('theme'), r = document.documentElement;
+  try { var s = localStorage.getItem('theme'); if (s) r.setAttribute('data-theme', s); } catch (e) {}
+  b.addEventListener('click', function () {
+    var dark = r.getAttribute('data-theme') ? r.getAttribute('data-theme') === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    var n = dark ? 'light' : 'dark'; r.setAttribute('data-theme', n);
+    try { localStorage.setItem('theme', n); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+# Отдельный sshd только для туннелей клиентов (служба sshd_tunnel). Обычный sshd сервера не трогаем.
+# Порт поменяйте на свой и откройте его в брандмауэре. Пароли выключены — только ключи.
+Port 22022
+HostKey __PROGRAMDATA__/ssh/ssh_host_ed25519_key
+HostKey __PROGRAMDATA__/ssh/ssh_host_rsa_key
+HostKey __PROGRAMDATA__/ssh/ssh_host_ecdsa_key
+PubkeyAuthentication yes
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+AllowUsers claude_tunnel claude_enroll
+AuthorizedKeysFile __PROGRAMDATA__/ssh/tunnel_authorized_keys
+AllowTcpForwarding remote
+GatewayPorts no
+PermitTTY no
+X11Forwarding no
+AllowAgentForwarding no
+ForceCommand C:/Windows/System32/hostname.exe
+MaxAuthTries 2
+LoginGraceTime 20
+ClientAliveInterval 30
+ClientAliveCountMax 4
+
+# Регистрация: клиент входит общим ключом регистрации, сервер выдаёт ему порт и вписывает его личный ключ.
+Match User claude_enroll
+    AuthorizedKeysFile __PROGRAMDATA__/ssh/enroll_authorized_keys
+    AllowTcpForwarding no
+    ForceCommand C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:/ProgramData/ssh/tunnel_enroll.ps1

@@ -1,0 +1,747 @@
+﻿// Туннель Claude — окно для клиента: проверка ПК встроенным Защитником Windows (без удаления, с отчётом) и обратный SSH-туннель
+// для удалённого обслуживания 1С. Кнопки ВКЛЮЧИТЬ / ВЫКЛЮЧИТЬ / ПОЧИНИТЬ, крупный статус «туннель поднят или нет и почему»,
+// пинг до серверов специалистов (с флагами), Radmin VPN как запасной путь, снимок окна, журнал «кто заходил и что делал»
+// на рабочем столе (понятен любому ИИ), лог запуска и ошибок специалистам (галочка). Установку делает встроенный скрипт туннеля.
+// Всё «своё» (сервер, порт, ключи специалистов, отпечаток сервера, серверы с флагами) — в profile.ini, он вшивается при сборке (build.ps1).
+using Microsoft.Win32;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Diagnostics.Eventing.Reader;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Management;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
+using System.Reflection;
+using System.Security.AccessControl;
+using System.Security.Cryptography;
+using System.Security.Principal;
+using System.ServiceProcess;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Windows.Forms;
+
+static class Program
+{
+    [STAThread]
+    static void Main()
+    {
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        Application.Run(new MainForm());
+    }
+}
+
+class Srv
+{
+    public string Name, Ip, Radmin; public int TcpPort; public Bitmap Flag;
+    public Srv(string name, string ip, string radmin, int tcpPort, Bitmap flag) { Name = name; Ip = ip; Radmin = radmin; TcpPort = tcpPort; Flag = flag; }
+}
+
+class Row
+{
+    public string Name, Value; public int St;   // St: 0 красный, 1 зелёный, 2 жёлтый, 3 серый
+    public Row(string n, string v, int s) { Name = n; Value = v; St = s; }
+}
+
+class Result
+{
+    public List<Row> Rows = new List<Row>();
+    public List<string[]> Pings = new List<string[]>();
+    public int Overall; public string Head = "", Port = "", Radmin = "", Pc = "";
+    public int TaskSt;
+}
+
+class MainForm : Form
+{
+    // профиль сборки (profile.ini, вшит ресурсом): сервер, порт, имена, ключи специалистов, серверы с флагами
+    static readonly Profile Pf = Profile.Load();
+    static readonly string Rel = Pf.Get("rel", "версия 102");
+    static readonly string SrvIp = Pf.Get("host", ""); static readonly int SrvPort = int.Parse(Pf.Get("port", "22")); static readonly string TaskName = Pf.Get("task_name", "Claude туннель");
+    static readonly string SN = Pf.Get("srv_name", "поддержки"), HostAlias = Pf.Get("host_alias", "claude16");
+    static readonly string TunnelUser = Pf.Get("tunnel_user", "claude_tunnel"), EnrollUser = Pf.Get("enroll_user", "claude_enroll");
+    static readonly string Org = Pf.Get("org", "специалисты поддержки"), JournalName = Pf.Get("journal", "Журнал доступа Claude.txt");
+    static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ClaudeTunnel");
+    static readonly string JournalPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), JournalName);
+    static readonly object jlock = new object();
+
+    // известные ключи специалистов: отпечаток -> кто
+    static readonly Dictionary<string, string> Keys = new Dictionary<string, string>();
+    static void AddKey(string blob, string who)
+    {
+        try { using (var sha = SHA256.Create()) Keys["SHA256:" + Convert.ToBase64String(sha.ComputeHash(Convert.FromBase64String(blob))).TrimEnd('=')] = who; }
+        catch (FormatException) { }   // в профиле не ключ (например, заготовка из profile.example.ini) — пропускаем
+    }
+
+    Label lblStatus, lblInfo, lblPhone; TextBox txtPhone, txtLog; ListView lvSrv, lvChk; CheckBox chkSend;
+    Button bOn, bOff, bFix, bShot, bCopy, bJournal;
+    System.Windows.Forms.Timer tm; volatile bool checking, busy;
+    Srv[] servers; Result last;
+
+    public MainForm()
+    {
+        foreach (var k in Pf.Sections("key")) AddKey(k.Get("blob", ""), k.Get("label", ""));
+        servers = Pf.Sections("server").Select(s => new Srv(s.Get("name", ""), s.Get("ip", ""), s.Get("radmin", ""), int.Parse(s.Get("tcp", "0")), FlagBy(s.Get("flag", "")))).ToArray();
+
+        Text = "Туннель Claude — " + Rel + " — ПК " + Environment.MachineName;
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+        Font = new Font("Segoe UI", 11f);
+        ClientSize = new Size(940, 860); MinimumSize = new Size(760, 640);
+        StartPosition = FormStartPosition.CenterScreen;
+        BackColor = Color.White;
+
+        lblStatus = new Label { Dock = DockStyle.Top, Height = 96, Font = new Font("Segoe UI", 19f, FontStyle.Bold), ForeColor = Color.White, BackColor = Color.Gray, TextAlign = ContentAlignment.MiddleCenter, Text = "Проверяю..." };
+        lblInfo = new Label { Dock = DockStyle.Top, Height = 62, Font = new Font("Segoe UI", 13f, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(10, 0, 0, 0) };
+
+        var pPhone = new Panel { Dock = DockStyle.Top, Height = 42, Padding = new Padding(10, 6, 10, 4) };
+        lblPhone = new Label { Text = "Ваш сотовый (необязательно):", AutoSize = true, Location = new Point(10, 10) };
+        txtPhone = new TextBox { Location = new Point(250, 7), Width = 200 };
+        chkSend = new CheckBox { Text = "Отправлять лог специалистам", AutoSize = true, Location = new Point(475, 9), Checked = !File.Exists(NoLogFlag) };
+        new ToolTip { AutoPopDelay = 20000 }.SetToolTip(chkSend, "Программа отправляет на наш сервер " + SN + " состояние туннеля и текст ошибок (без паролей и ваших файлов).\nБез этого мы не увидим, почему туннель не поднялся, — придётся присылать снимок.");
+        chkSend.CheckedChanged += delegate
+        {
+            try { Directory.CreateDirectory(GuiDir); if (chkSend.Checked) File.Delete(NoLogFlag); else File.WriteAllText(NoLogFlag, "лог специалистам выключен " + DateTime.Now); } catch { }
+            Journal(null, chkSend.Checked ? "ЛОГ СПЕЦИАЛИСТАМ ВКЛЮЧЁН" : "ЛОГ СПЕЦИАЛИСТАМ ВЫКЛЮЧЕН", "клиент (галочка)", "этот ПК", "");
+            sendInfo = chkSend.Checked ? "включено" : "выключено галочкой — специалисты не увидят причину ошибки"; sendSt = 3;
+        };
+        pPhone.Controls.Add(lblPhone); pPhone.Controls.Add(txtPhone); pPhone.Controls.Add(chkSend);
+
+        var pBtn = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 64, Padding = new Padding(6, 6, 6, 4), WrapContents = false, AutoScroll = true };
+        bOn = Btn("ВКЛЮЧИТЬ", Color.FromArgb(30, 140, 60), 150);
+        bOff = Btn("ВЫКЛЮЧИТЬ", Color.FromArgb(190, 40, 40), 150);
+        bFix = Btn("ПОЧИНИТЬ", Color.FromArgb(40, 90, 170), 140);
+        bShot = Btn("СНИМОК ДЛЯ НАС", Color.FromArgb(90, 90, 90), 180);
+        bCopy = Btn("Копировать текст", Color.FromArgb(120, 120, 120), 160);
+        bJournal = Btn("Журнал", Color.FromArgb(120, 120, 120), 100);
+        pBtn.Controls.AddRange(new Control[] { bOn, bOff, bFix, bShot, bCopy, bJournal });
+        bOn.Click += delegate { DoOn(); };
+        bOff.Click += delegate { DoOff(); };
+        bFix.Click += delegate { RunSetup("ПОЧИНИТЬ"); };
+        bShot.Click += delegate { DoShot(); };
+        bCopy.Click += delegate { try { Clipboard.SetText(Report()); MessageBox.Show(this, "Текст скопирован. Вставьте его в WhatsApp (Ctrl+V) и отправьте нам.", Text); } catch { } };
+        bJournal.Click += delegate { EnsureJournal(); try { Process.Start("notepad.exe", "\"" + JournalPath + "\""); } catch { } };
+
+        var flags = new ImageList { ImageSize = new Size(36, 24), ColorDepth = ColorDepth.Depth32Bit };
+        foreach (var s in servers) flags.Images.Add(s.Flag);
+        lvSrv = new ListView { Dock = DockStyle.Top, Height = 128, View = View.Details, FullRowSelect = true, HeaderStyle = ColumnHeaderStyle.Nonclickable, SmallImageList = flags, Font = new Font("Segoe UI", 12f) };
+        lvSrv.Columns.Add("Наши серверы", 330); lvSrv.Columns.Add("Пинг через интернет", 250); lvSrv.Columns.Add("Пинг через Radmin VPN", 300);
+        for (int i = 0; i < servers.Length; i++) { var it = new ListViewItem(servers[i].Name, i); it.SubItems.Add("..."); it.SubItems.Add("..."); lvSrv.Items.Add(it); }
+
+        var dots = new ImageList { ImageSize = new Size(20, 20), ColorDepth = ColorDepth.Depth32Bit };
+        foreach (var c in new[] { Color.FromArgb(210, 40, 40), Color.FromArgb(30, 160, 60), Color.FromArgb(230, 160, 0), Color.Gray }) dots.Images.Add(Dot(c));
+        lvChk = new ListView { Dock = DockStyle.Top, Height = 290, View = View.Details, FullRowSelect = true, HeaderStyle = ColumnHeaderStyle.Nonclickable, SmallImageList = dots, Font = new Font("Segoe UI", 12f) };
+        lvChk.Columns.Add("Проверка", 300); lvChk.Columns.Add("Результат", 600);
+
+        txtLog = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Font = new Font("Consolas", 10f), BackColor = Color.FromArgb(245, 245, 245) };
+
+        Controls.Add(txtLog); Controls.Add(lvChk); Controls.Add(lvSrv); Controls.Add(pBtn); Controls.Add(pPhone); Controls.Add(lblInfo); Controls.Add(lblStatus);
+
+        txtPhone.Text = GuessPhone();
+        Log("Программа «Туннель Claude» " + Rel + ". Журнал входов: " + JournalPath);
+        EnsureJournal();
+        tm = new System.Windows.Forms.Timer { Interval = 5000 };
+        tm.Tick += delegate { StartCheck(); };
+        Shown += delegate { StartCheck(); tm.Start(); };
+        Resize += delegate { FitColumns(); };
+        FitColumns();
+    }
+
+    void FitColumns()
+    {
+        int w = lvChk.ClientSize.Width; if (w < 300) return;
+        lvChk.Columns[0].Width = 290; lvChk.Columns[1].Width = Math.Max(200, w - 295);
+        int ws = lvSrv.ClientSize.Width; lvSrv.Columns[0].Width = 320; lvSrv.Columns[1].Width = (ws - 325) / 2; lvSrv.Columns[2].Width = (ws - 325) / 2;
+    }
+
+    Button Btn(string t, Color c, int w)
+    {
+        var b = new Button { Text = t, Width = w, Height = 50, BackColor = c, ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 11.5f, FontStyle.Bold), Margin = new Padding(4) };
+        b.FlatAppearance.BorderSize = 0; return b;
+    }
+
+    // ---------- флаги и значки ----------
+    static Bitmap FlagRu()
+    {
+        var b = new Bitmap(36, 24); using (var g = Graphics.FromImage(b))
+        { g.FillRectangle(Brushes.White, 0, 0, 36, 8); using (var bl = new SolidBrush(Color.FromArgb(0, 57, 166))) g.FillRectangle(bl, 0, 8, 36, 8); using (var r = new SolidBrush(Color.FromArgb(213, 43, 30))) g.FillRectangle(r, 0, 16, 36, 8); g.DrawRectangle(Pens.LightGray, 0, 0, 35, 23); }
+        return b;
+    }
+    static Bitmap FlagGe()
+    {
+        var b = new Bitmap(36, 24); using (var g = Graphics.FromImage(b)) using (var r = new SolidBrush(Color.FromArgb(255, 0, 0)))
+        {
+            g.FillRectangle(Brushes.White, 0, 0, 36, 24); g.FillRectangle(r, 15, 0, 6, 24); g.FillRectangle(r, 0, 9, 36, 6);
+            foreach (var p in new[] { new Point(7, 4), new Point(28, 4), new Point(7, 19), new Point(28, 19) }) { g.FillRectangle(r, p.X - 1, p.Y - 3, 2, 6); g.FillRectangle(r, p.X - 3, p.Y - 1, 6, 2); }
+            g.DrawRectangle(Pens.LightGray, 0, 0, 35, 23);
+        }
+        return b;
+    }
+    static Bitmap FlagFi()
+    {
+        var b = new Bitmap(36, 24); using (var g = Graphics.FromImage(b)) using (var bl = new SolidBrush(Color.FromArgb(0, 47, 108)))
+        { g.FillRectangle(Brushes.White, 0, 0, 36, 24); g.FillRectangle(bl, 10, 0, 6, 24); g.FillRectangle(bl, 0, 9, 36, 6); g.DrawRectangle(Pens.LightGray, 0, 0, 35, 23); }
+        return b;
+    }
+    static Bitmap FlagBy(string code)
+    {
+        switch ((code ?? "").Trim().ToLowerInvariant())
+        {
+            case "ru": return FlagRu();
+            case "ge": return FlagGe();
+            case "fi": return FlagFi();
+        }
+        var b = new Bitmap(36, 24); using (var g = Graphics.FromImage(b)) g.DrawRectangle(Pens.LightGray, 0, 0, 35, 23);
+        return b;
+    }
+    static Bitmap Dot(Color c)
+    {
+        var b = new Bitmap(20, 20); using (var g = Graphics.FromImage(b)) using (var br = new SolidBrush(c))
+        { g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias; g.FillEllipse(br, 2, 2, 16, 16); }
+        return b;
+    }
+
+    // ---------- журнал на рабочем столе ----------
+    static readonly string Header =
+        "ЖУРНАЛ ДОСТУПА СПЕЦИАЛИСТОВ К ЭТОМУ КОМПЬЮТЕРУ (программа «Туннель Claude»)\r\n" +
+        "Что это: вы сами установили программу, чтобы " + Org + " могли помочь вам удалённо.\r\n" +
+        "Сюда пишется само: когда доступ включали и выключали, кто заходил (по какому ключу), откуда и какие команды выполнял.\r\n" +
+        "Полные записи каждого входа (команды и ответы компьютера) — в папке C:\\ProgramData\\ClaudeTunnel\\sessions.\r\n" +
+        "Этот файл можно отправить любому ИИ (ChatGPT, Claude, Алиса и др.) с вопросом «что делали на моём компьютере?».\r\n" +
+        "Выключить доступ в любой момент — кнопка «ВЫКЛЮЧИТЬ» в программе «Туннель Claude».\r\n" +
+        "Формат строки: дата время | событие | кто | откуда | подробности\r\n" +
+        "--------------------------------------------------------------------------------\r\n";
+
+    static void EnsureJournal()
+    {
+        lock (jlock) { try { if (!File.Exists(JournalPath)) File.WriteAllText(JournalPath, Header, new UTF8Encoding(true)); } catch { } }
+    }
+    static void Journal(DateTime? t, string ev, string who, string from, string det)
+    {
+        EnsureJournal();
+        lock (jlock)
+        {
+            try { File.AppendAllText(JournalPath, (t ?? DateTime.Now).ToString("dd.MM.yyyy HH:mm:ss") + " | " + ev + " | " + who + " | " + from + " | " + det + "\r\n", new UTF8Encoding(true)); } catch { }
+        }
+    }
+    static readonly Dictionary<string, string> FromMap = BuildFrom();
+    static Dictionary<string, string> BuildFrom()
+    {
+        var d = new Dictionary<string, string>();
+        d["127.0.0.1"] = d["::1"] = Pf.Get("tunnel_from", "через туннель (сервер " + SN + ")");
+        foreach (var s in Pf.Sections("server"))
+        {
+            string lb = s.Get("label", s.Get("name", ""));
+            if (s.Get("ip", "") != "") d[s.Get("ip", "")] = lb;
+            if (s.Get("radmin", "") != "") d[s.Get("radmin", "")] = "Radmin: " + lb;
+        }
+        return d;
+    }
+    static string From(string ip) { string v; return ip != null && FromMap.TryGetValue(ip, out v) ? v : ip; }
+
+    // входы и выходы из журнала Windows OpenSSH -> в журнал на рабочем столе
+    static void SyncEvents()
+    {
+        try
+        {
+            string stf = Path.Combine(Dir, "gui_events.txt");
+            long lastId = 0; try { long.TryParse(File.ReadAllText(stf).Trim(), out lastId); } catch { }
+            string xp = lastId > 0 ? "*[System[(EventRecordID > " + lastId + ")]]" : "*[System[TimeCreated[timediff(@SystemTime) <= 259200000]]]";
+            long maxId = lastId;
+            using (var r = new EventLogReader(new EventLogQuery("OpenSSH/Operational", PathType.LogName, xp)))
+            {
+                EventRecord e;
+                while ((e = r.ReadEvent()) != null)
+                    using (e)
+                    {
+                        long id = e.RecordId ?? 0; if (id > maxId) maxId = id;
+                        string m = string.Join(" ", e.Properties.Select(p => "" + p.Value));
+                        var a = Regex.Match(m, @"Accepted publickey for (.+?) from (\S+) port \d+ ssh2: \S+ (SHA256:\S+)");
+                        if (a.Success)
+                        {
+                            string who; if (!Keys.TryGetValue(a.Groups[3].Value, out who)) who = "НЕИЗВЕСТНЫЙ ключ " + a.Groups[3].Value;
+                            Journal(e.TimeCreated, "ВХОД", who, From(a.Groups[2].Value), "вход Windows: " + a.Groups[1].Value);
+                            continue;
+                        }
+                        var d = Regex.Match(m, @"Disconnected from (?:user )?(.+?) (\S+) port \d+");
+                        if (d.Success) { Journal(e.TimeCreated, "ВЫХОД", "", From(d.Groups[2].Value), "вход Windows: " + d.Groups[1].Value); continue; }
+                        if (Regex.IsMatch(m, "Failed publickey|Invalid user|Failed password")) Journal(e.TimeCreated, "ОТКАЗ ВО ВХОДЕ", "", "", m.Trim());
+                    }
+            }
+            if (maxId > lastId) { Directory.CreateDirectory(Dir); File.WriteAllText(stf, maxId.ToString()); }
+        }
+        catch { }
+    }
+
+    // ---------- проверки ----------
+    static long TcpMs(string ip, int port, int to)
+    {
+        var sw = Stopwatch.StartNew();
+        try { using (var c = new TcpClient()) { var ar = c.BeginConnect(ip, port, null, null); if (!ar.AsyncWaitHandle.WaitOne(to)) return -1; c.EndConnect(ar); return Math.Max(1, sw.ElapsedMilliseconds); } }
+        catch { return -1; }
+    }
+    static long PingMs(string ip, int to)
+    {
+        try { using (var p = new Ping()) { var r = p.Send(ip, to); if (r.Status == IPStatus.Success) return Math.Max(1, r.RoundtripTime); } } catch { }
+        return -1;
+    }
+    static string RadminIp()
+    {
+        try
+        {
+            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                foreach (var a in ni.GetIPProperties().UnicastAddresses)
+                    if (a.Address.AddressFamily == AddressFamily.InterNetwork && a.Address.ToString().StartsWith("26.")) return a.Address.ToString();
+            }
+        }
+        catch { }
+        return "";
+    }
+    static bool ServiceExists(string name) { try { using (var s = new ServiceController(name)) { var x = s.Status; return true; } } catch { return false; } }
+
+    static int TaskState()   // -1 нет задачи, 0 выключена, 1 включена, 2 выполняется
+    {
+        try
+        {
+            dynamic s = Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service")); s.Connect();
+            dynamic t = s.GetFolder("\\").GetTask(TaskName);
+            if (!(bool)t.Enabled) return 0;
+            return ((int)t.State) == 4 ? 2 : 1;
+        }
+        catch { return -1; }
+    }
+    static void TaskSet(bool on)
+    {
+        dynamic s = Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service")); s.Connect();
+        dynamic t = s.GetFolder("\\").GetTask(TaskName);
+        t.Enabled = on;
+        if (on) t.Run(null); else { try { t.Stop(0); } catch { } }
+    }
+    static List<int> TunnelPids(out double upSec)
+    {
+        upSec = 0; var res = new List<int>();
+        try
+        {
+            using (var q = new ManagementObjectSearcher("SELECT ProcessId,CommandLine,CreationDate FROM Win32_Process WHERE Name='ssh.exe'"))
+                foreach (ManagementObject o in q.Get())
+                {
+                    string cl = "" + o["CommandLine"];
+                    if (cl.IndexOf("ClaudeTunnel", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (cl.Contains(TunnelUser + "@")) { try { upSec = Math.Max(upSec, (DateTime.Now - ManagementDateTimeConverter.ToDateTime("" + o["CreationDate"])).TotalSeconds); } catch { } }
+                    res.Add(Convert.ToInt32(o["ProcessId"]));
+                }
+        }
+        catch { }
+        return res;
+    }
+    static string Banner()
+    {
+        try
+        {
+            using (var c = new TcpClient())
+            {
+                var ar = c.BeginConnect("127.0.0.1", 22, null, null);
+                if (!ar.AsyncWaitHandle.WaitOne(3000)) return "(порт 22 не отвечает)";
+                c.EndConnect(ar);
+                var st = c.GetStream(); st.ReadTimeout = 5000; var b = new byte[80]; int n = st.Read(b, 0, 80);
+                if (n <= 0) return "(соединение закрыто сразу)";
+                return Encoding.ASCII.GetString(b, 0, n).Trim();
+            }
+        }
+        catch (Exception ex) { return "(" + (ex.InnerException != null ? ex.InnerException.Message : ex.Message) + ")"; }
+    }
+    static string ReadShared(string path)
+    {
+        try { using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) using (var sr = new StreamReader(fs)) return sr.ReadToEnd(); }
+        catch { return null; }
+    }
+    static string LogReason(out string lastLine)
+    {
+        lastLine = "";
+        string t = ReadShared(Path.Combine(Dir, "ssh.log")); if (string.IsNullOrEmpty(t)) return null;
+        var lines = t.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries); if (lines.Length == 0) return null;
+        lastLine = lines[lines.Length - 1].Trim();
+        string tail = string.Join("\n", lines.Skip(Math.Max(0, lines.Length - 6)));
+        if (tail.Contains("Permission denied")) return "сервер " + SN + " не узнал ключ этого ПК — нажмите «ПОЧИНИТЬ»";
+        if (tail.Contains("forwarding failed") || tail.Contains("remote port forwarding")) return "на сервере " + SN + " ещё висит прошлое подключение — подождите 1–2 минуты";
+        if (tail.Contains("timed out")) return "сервер " + SN + " не отвечает: нет интернета, или провайдер/антивирус закрывает порт " + SrvPort + "";
+        if (tail.Contains("Connection refused")) return "сервер " + SN + " отказал в соединении — напишите нам";
+        if (tail.Contains("Could not resolve") || tail.Contains("No such host")) return "нет интернета (имя сервера не найдено)";
+        if (tail.Contains("Host key verification failed") || tail.Contains("No host key is known")) return "отпечаток сервера не принят — нажмите «ПОЧИНИТЬ»";
+        if (tail.Contains("UNPROTECTED PRIVATE KEY") || tail.Contains("Bad permissions")) return "неверные права на ключ — нажмите «ПОЧИНИТЬ»";
+        if (tail.Contains("Connection reset") || tail.Contains("Connection closed")) return "связь с сервером " + SN + " обрывается (антивирус, VPN или провайдер)";
+        return null;
+    }
+
+    Result Check()
+    {
+        var R = new Result(); var rows = R.Rows;
+        // пинги до трёх серверов — параллельно
+        string rip = RadminIp(); R.Radmin = rip;
+        var pings = new string[servers.Length][];
+        var ths = new List<Thread>();
+        for (int i = 0; i < servers.Length; i++)
+        {
+            int k = i; var th = new Thread(() =>
+            {
+                var s = servers[k]; string inet, rad;
+                long ms = PingMs(s.Ip, 1500);
+                if (ms > 0) inet = ms + " мс";
+                else if (s.TcpPort > 0 && (ms = TcpMs(s.Ip, s.TcpPort, 2000)) > 0) inet = ms + " мс (порт " + s.TcpPort + ")";
+                else inet = "нет ответа";
+                if (s.Radmin == "") rad = "—";
+                else if (rip == "") rad = "Radmin не подключён";
+                else { long rm = PingMs(s.Radmin, 1500); rad = rm > 0 ? rm + " мс  (" + s.Radmin + ")" : "нет ответа (" + s.Radmin + ")"; }
+                pings[k] = new[] { inet, rad };
+            }); th.IsBackground = true; th.Start(); ths.Add(th);
+        }
+
+        R.TaskSt = TaskState();
+        double up; var pids = TunnelPids(out up);
+        bool tunnelAlive = up >= 10;
+        long net = TcpMs(SrvIp, SrvPort, 3000);
+        string banner = ServiceExists("sshd") ? Banner() : "(SSH на этом ПК не установлен)";
+        bool sshOk = banner.StartsWith("SSH-2.0");
+        string pt = ReadShared(Path.Combine(Dir, "port.txt"));
+        if (!string.IsNullOrEmpty(pt)) { var p = pt.Trim().Split(' '); if (p.Length >= 2) R.Port = p[1]; }
+        string lastLine; string reason = LogReason(out lastLine);
+        foreach (var th in ths) th.Join(4000);
+        for (int i = 0; i < servers.Length; i++) R.Pings.Add(pings[i] ?? new[] { "...", "..." });
+
+        rows.Add(new Row("Связь с сервером " + SN, net > 0 ? "есть, " + net + " мс" : "НЕТ — интернет или блокировка порта " + SrvPort + " (провайдер, антивирус)", net > 0 ? 1 : 0));
+        string svc;
+        int svcSt;
+        if (!ServiceExists("sshd")) { svc = "не установлена — нажмите «ВКЛЮЧИТЬ»"; svcSt = 0; }
+        else { using (var sc = new ServiceController("sshd")) { var stt = sc.Status; svc = stt == ServiceControllerStatus.Running ? "работает" : "не работает (" + stt + ") — нажмите «ПОЧИНИТЬ»"; svcSt = stt == ServiceControllerStatus.Running ? 1 : 0; } }
+        rows.Add(new Row("Служба SSH на этом ПК", svc, svcSt));
+        rows.Add(new Row("SSH отвечает", sshOk ? "да (" + banner + ")" : "НЕТ " + banner, sshOk ? 1 : 0));
+        string ts = R.TaskSt == -1 ? "не установлена — нажмите «ВКЛЮЧИТЬ»" : R.TaskSt == 0 ? "ВЫКЛЮЧЕНА (кнопка «ВЫКЛЮЧИТЬ»)" : R.TaskSt == 2 ? "включена, работает" : "включена, перезапускается каждую минуту";
+        rows.Add(new Row("Задача «" + TaskName + "»", ts, R.TaskSt == -1 ? 0 : R.TaskSt == 0 ? 3 : 1));
+        rows.Add(new Row("Туннель до сервера " + SN, tunnelAlive ? "поднят, держится " + Dur(up) : pids.Count > 0 ? "подключается..." : "не поднят", tunnelAlive ? 1 : pids.Count > 0 ? 2 : 0));
+        bool radSvc = ServiceExists("RvControlSvc");
+        rows.Add(new Row("Radmin VPN (запасной путь)", rip != "" ? "подключён, адрес " + rip : radSvc ? "установлен, но не в сети" : "не установлен (не обязательно)", rip != "" ? 1 : radSvc ? 2 : 3));
+        rows.Add(new Row("Лог для специалистов", sendInfo, sendSt));
+        if (!string.IsNullOrEmpty(lastLine)) rows.Add(new Row("Последняя запись туннеля", lastLine.Length > 160 ? lastLine.Substring(0, 160) : lastLine, reason == null ? 3 : 0));
+
+        bool radPath = rip != "" && sshOk;
+        if (R.TaskSt == -1) { R.Overall = 0; R.Head = "ТУННЕЛЬ НЕ УСТАНОВЛЕН — нажмите «ВКЛЮЧИТЬ»"; }
+        else if (R.TaskSt == 0) { R.Overall = 3; R.Head = "ДОСТУП ВЫКЛЮЧЕН — специалисты зайти не могут"; }
+        else if (tunnelAlive && net > 0 && sshOk) { R.Overall = 1; R.Head = "ТУННЕЛЬ РАБОТАЕТ — доступ открыт"; }
+        else if (tunnelAlive && !sshOk) { R.Overall = 2; R.Head = "Туннель есть, но SSH на ПК не отвечает — нажмите «ПОЧИНИТЬ»"; }
+        else
+        {
+            string why = net <= 0 ? "нет связи с сервером " + SN + " (интернет, провайдер или антивирус)" : reason ?? (!sshOk ? "SSH на этом ПК не отвечает — нажмите «ПОЧИНИТЬ»" : pids.Count > 0 ? "подключается, подождите до 1 минуты" : "переподключается, подождите до 1 минуты");
+            R.Overall = radPath ? 2 : 0;
+            R.Head = "ТУННЕЛЬ НЕ ПОДНЯТ: " + why + (radPath ? "\nНо доступ есть через Radmin VPN " + rip : "");
+        }
+        SyncEvents();
+        return R;
+    }
+    static string Dur(double s) { var t = TimeSpan.FromSeconds(s); return t.TotalHours >= 1 ? (int)t.TotalHours + " ч " + t.Minutes + " мин" : t.TotalMinutes >= 1 ? (int)t.TotalMinutes + " мин" : (int)s + " с"; }
+
+    void StartCheck()
+    {
+        if (checking) return; checking = true;
+        var th = new Thread(() =>
+        {
+            Result r = null; try { r = Check(); } catch (Exception ex) { r = new Result { Overall = 0, Head = "Ошибка проверки: " + ex.Message }; }
+            try { BeginInvoke(new Action(() => { Show(r); checking = false; })); } catch { checking = false; }
+        });
+        th.IsBackground = true; th.Start();
+    }
+
+    void Show(Result r)
+    {
+        last = r;
+        Color[] cs = { Color.FromArgb(200, 35, 35), Color.FromArgb(25, 140, 55), Color.FromArgb(215, 140, 0), Color.FromArgb(110, 110, 110) };
+        lblStatus.BackColor = cs[r.Overall]; lblStatus.Text = r.Head;
+        lblStatus.Font = new Font("Segoe UI", r.Head.Length > 70 ? 15f : 19f, FontStyle.Bold);
+        lblInfo.Text = "Номер для специалиста: " + (r.Port != "" ? r.Port : "—") + "     ПК: " + Environment.MachineName +
+                       "\nRadmin: " + (r.Radmin != "" ? r.Radmin : "нет") + "     проверено " + DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss");
+        lvChk.BeginUpdate(); lvChk.Items.Clear();
+        foreach (var row in r.Rows) { var it = new ListViewItem(row.Name, row.St); it.SubItems.Add(row.Value); lvChk.Items.Add(it); }
+        lvChk.EndUpdate();
+        for (int i = 0; i < r.Pings.Count && i < lvSrv.Items.Count; i++) { lvSrv.Items[i].SubItems[1].Text = r.Pings[i][0]; lvSrv.Items[i].SubItems[2].Text = r.Pings[i][1]; }
+        bOn.Enabled = !busy && r.TaskSt != 1 && r.TaskSt != 2 || !busy && r.Overall == 0;
+        bOff.Enabled = !busy && r.TaskSt > 0;
+        bFix.Enabled = !busy;
+        // лог на сервер: при запуске, после установки и кнопок, и когда статус стал красным (не чаще раза в 10 минут)
+        if (!busy && prevOverall > 0 && r.Overall == 0 && (DateTime.Now - lastAuto).TotalMinutes >= 10) { pending = "статус стал красным"; lastAuto = DateTime.Now; }
+        prevOverall = r.Overall;
+        if (pending != null && !busy) { string w = pending; pending = null; SendLog(w); }
+    }
+
+    // ---------- лог для специалистов на сервер (версия 102) ----------
+    static readonly string GuiDir = Path.Combine(Dir, "gui");
+    static readonly string NoLogFlag = Path.Combine(GuiDir, "nolog.flag");
+    static readonly string HostKeys = string.Join("", Pf.Sections("hostkeys").SelectMany(h => h.All("line")).Select(x => x + "\n"));
+    static readonly object slock = new object();
+    volatile string sendInfo = "ещё не отправлялся"; volatile int sendSt = 3;
+    string pending = "запуск программы"; DateTime lastAuto = DateTime.MinValue; int prevOverall = -1;
+
+    void SendLog(string why)
+    {
+        if (!chkSend.Checked) { sendInfo = "выключено галочкой — специалисты не увидят причину ошибки"; sendSt = 3; return; }
+        string body = BuildLog(why);
+        string ph = Regex.Replace(txtPhone.Text, @"\D", ""); if (!Regex.IsMatch(ph, @"^7\d{10}$")) ph = "0";
+        sendInfo = "отправляю..."; sendSt = 2;
+        var th = new Thread(() => SendWorker(why, body, ph)); th.IsBackground = true; th.Start();
+    }
+
+    void SendWorker(string why, string body, string ph)
+    {
+        lock (slock)
+        {
+            string outbox = Path.Combine(GuiDir, "outbox"), err;
+            if (SshLog(ph, body, out err))
+            {
+                sendInfo = "отправлен " + DateTime.Now.ToString("HH:mm:ss") + " (" + why + ")"; sendSt = 1;
+                Log("Лог отправлен специалистам на сервер " + SN + " (" + why + ").");
+                Journal(null, "ЛОГ ОТПРАВЛЕН", "программа", "этот ПК", "специалистам на сервер " + SN + ": состояние туннеля и ошибки (" + why + "), без паролей и файлов");
+                try { foreach (var f in Directory.GetFiles(outbox, "*.txt").OrderBy(x => x).Take(5)) { string e2; if (SshLog(ph, File.ReadAllText(f, Encoding.UTF8), out e2)) File.Delete(f); else break; } } catch { }
+            }
+            else
+            {
+                sendInfo = "не ушёл: " + err + " — отправлю позже"; sendSt = 2;
+                Log("Лог на сервер " + SN + " не ушёл: " + err);
+                try
+                {
+                    Directory.CreateDirectory(outbox);
+                    var old = Directory.GetFiles(outbox, "*.txt").OrderBy(x => x).ToArray();
+                    for (int i = 0; i < old.Length - 19; i++) File.Delete(old[i]);
+                    int nl = body.IndexOf('\n');
+                    File.WriteAllText(Path.Combine(outbox, DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + ".txt"),
+                        body.Substring(0, nl + 1) + "(лог отложен: в " + DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss") + " не ушёл — " + err + ")\n" + body.Substring(nl + 1), new UTF8Encoding(false));
+                }
+                catch { }
+            }
+        }
+    }
+
+    static string SshPath()
+    {
+        return new[] {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"OpenSSH\ssh.exe"),
+            Path.Combine(Environment.SystemDirectory, @"OpenSSH\ssh.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), @"Sysnative\OpenSSH\ssh.exe") }.FirstOrDefault(File.Exists);
+    }
+
+    // ключ регистрации (общий, тот же, что во встроенном скрипте) и отпечаток сервера — в ProgramData\ClaudeTunnel\gui
+    static void PrepareKey(string ek, string kh)
+    {
+        Directory.CreateDirectory(GuiDir);
+        if (!File.Exists(ek))
+        {
+            var m = Regex.Match(Res("setup_core.ps1"), @"-----BEGIN OPENSSH PRIVATE KEY-----.*?-----END OPENSSH PRIVATE KEY-----", RegexOptions.Singleline);
+            File.WriteAllText(ek, m.Value.Replace("\r\n", "\n") + "\n", new UTF8Encoding(false));
+        }
+        // владелец Администраторы, доступ только SYSTEM и Администраторы — иначе ssh скажет «UNPROTECTED PRIVATE KEY»
+        var acl = new FileSecurity(); acl.SetAccessRuleProtection(true, false);
+        var adm = new SecurityIdentifier("S-1-5-32-544"); acl.SetOwner(adm);
+        foreach (var sid in new[] { new SecurityIdentifier("S-1-5-18"), adm }) acl.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.FullControl, AccessControlType.Allow));
+        File.SetAccessControl(ek, acl);
+        File.WriteAllText(kh, HostKeys, new UTF8Encoding(false));
+    }
+
+    static bool SshLog(string ph, string body, out string err)
+    {
+        err = "";
+        string ssh = SshPath();
+        if (ssh == null) { err = "на ПК нет программы ssh.exe (её ставит кнопка «ВКЛЮЧИТЬ»)"; return false; }
+        string ek = Path.Combine(GuiDir, "enroll_key"), kh = Path.Combine(GuiDir, "known_hosts");
+        try { PrepareKey(ek, kh); } catch (Exception ex) { err = "ключ: " + ex.Message; return false; }
+        string pc = Regex.Replace(Environment.MachineName, @"[^A-Za-z0-9._-]", "_"); if (pc.Length > 40) pc = pc.Substring(0, 40);
+        byte[] data = Encoding.UTF8.GetBytes(body);
+        // два способа указать файлы — ssh 7.7 и новые читают пути по-разному (как в скрипте туннеля)
+        foreach (var w in new[] { new[] { ek.Replace('\\', '/'), kh.Replace('\\', '/') }, new[] { "\"" + ek + "\"", "\"" + kh + "\"" } })
+        {
+            string args = "-T -p " + SrvPort + " -o StrictHostKeyChecking=yes -o HostKeyAlias=" + HostAlias + " -o HostKeyAlgorithms=ssh-ed25519,ecdsa-sha2-nistp256" +
+                          " -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15 -o UserKnownHostsFile=" + w[1] + " -i " + w[0] +
+                          " " + EnrollUser + "@" + SrvIp + " \"log " + ph + " " + pc + "\"";
+            try
+            {
+                var psi = new ProcessStartInfo(ssh, args) { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+                using (var p = Process.Start(psi))
+                {
+                    string so = "", se = "";
+                    var tO = new Thread(() => { try { so = p.StandardOutput.ReadToEnd(); } catch { } }); tO.IsBackground = true; tO.Start();
+                    var tE = new Thread(() => { try { se = p.StandardError.ReadToEnd(); } catch { } }); tE.IsBackground = true; tE.Start();
+                    try { p.StandardInput.BaseStream.Write(data, 0, data.Length); p.StandardInput.Close(); } catch { }
+                    if (!p.WaitForExit(40000)) { try { p.Kill(); } catch { } err = "сервер " + SN + " не ответил за 40 с"; continue; }
+                    tO.Join(3000); tE.Join(3000);
+                    if (so.Contains("LOG=OK")) return true;
+                    var ln = (so + "\n" + se).Split('\n').Select(x => x.Trim()).Where(x => x != "" && !x.StartsWith("**")).ToArray();
+                    err = ln.Length > 0 ? ln[ln.Length - 1] : "нет ответа (код " + p.ExitCode + ")";
+                    if (err.Length > 150) err = err.Substring(0, 150);
+                }
+            }
+            catch (Exception ex) { err = ex.Message; }
+        }
+        return false;
+    }
+
+    static string WinName()
+    {
+        try
+        {
+            using (var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+            {
+                string name = "" + k.GetValue("ProductName"), build = "" + k.GetValue("CurrentBuild");
+                int b; if (int.TryParse(build, out b) && b >= 22000) name = name.Replace("Windows 10", "Windows 11");
+                return name + " " + (k.GetValue("DisplayVersion") ?? k.GetValue("ReleaseId") ?? "") + " (сборка " + build + "." + k.GetValue("UBR") + ")";
+            }
+        }
+        catch { return Environment.OSVersion.ToString(); }
+    }
+
+    string BuildLog(string why)
+    {
+        var sb = new StringBuilder();
+        sb.Append("STATUS: ").Append(last != null ? last.Head.Replace("\n", " / ") : "нет данных").Append("\n");
+        sb.Append("Программа «Туннель Claude» ").Append(Rel).Append(" · повод: ").Append(why).Append("\n");
+        sb.Append("Время ПК: ").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss zzz")).Append(" · ПК: ").Append(Environment.MachineName)
+          .Append(" · пользователь: ").Append(Environment.UserName).Append(" · сотовый: ").Append(txtPhone.Text).Append("\n");
+        sb.Append("Windows: ").Append(WinName()).Append(" · ").Append(Environment.Is64BitOperatingSystem ? "64" : "32").Append("-бит · .NET ").Append(Environment.Version).Append("\n");
+        string ssh = SshPath(); string sv = ""; try { if (ssh != null) sv = FileVersionInfo.GetVersionInfo(ssh).ProductVersion; } catch { }
+        sb.Append("ssh.exe: ").Append(ssh != null ? ssh + " " + sv : "нет").Append("\n");
+        sb.Append("port.txt: ").Append((ReadShared(Path.Combine(Dir, "port.txt")) ?? "нет").Trim()).Append("\n\n");
+        sb.Append(Report(0)).Append("\n");
+        string sl = ReadShared(Path.Combine(Dir, "ssh.log"));
+        if (!string.IsNullOrEmpty(sl)) { var a = sl.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries); sb.Append("--- ssh.log туннеля (последние 40 строк):\n"); foreach (var s in a.Skip(Math.Max(0, a.Length - 40))) sb.Append(s).Append("\n"); }
+        var l = txtLog.Lines; sb.Append("--- окно программы (последние 400 строк):\n");
+        foreach (var s in l.Skip(Math.Max(0, l.Length - 400))) sb.Append(s).Append("\n");
+        string t = sb.ToString();
+        while (Encoding.UTF8.GetByteCount(t) > 240000) t = t.Substring(0, 2000) + "\n…(середина обрезана)…\n" + t.Substring(t.Length - (t.Length - 2000) * 3 / 4);
+        return t;
+    }
+
+    string Report(int tail = 25)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(Text + "   " + DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss"));
+        if (last != null)
+        {
+            sb.AppendLine(last.Head.Replace("\n", " "));
+            sb.AppendLine("Номер для специалиста: " + last.Port + "   Radmin: " + last.Radmin);
+            foreach (var row in last.Rows) sb.AppendLine((row.St == 1 ? "[OK] " : row.St == 0 ? "[!!] " : "[--] ") + row.Name + ": " + row.Value);
+            for (int i = 0; i < last.Pings.Count; i++) sb.AppendLine(servers[i].Name + ": интернет " + last.Pings[i][0] + "; Radmin " + last.Pings[i][1]);
+        }
+        var l = txtLog.Lines; sb.AppendLine("--- последние строки:"); foreach (var s in l.Skip(Math.Max(0, l.Length - tail))) sb.AppendLine(s);
+        return sb.ToString();
+    }
+
+    void DoShot()
+    {
+        try
+        {
+            var b = new Bitmap(Width, Height);
+            using (var g = Graphics.FromImage(b)) g.CopyFromScreen(Location, Point.Empty, Size);
+            string f = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "Туннель Claude снимок " + DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss") + ".png");
+            b.Save(f, System.Drawing.Imaging.ImageFormat.Png);
+            Clipboard.SetImage(b);
+            pending = "кнопка СНИМОК ДЛЯ НАС"; StartCheck();
+            MessageBox.Show(this, "Снимок сохранён на рабочий стол и скопирован.\nОткройте WhatsApp, нажмите Ctrl+V и отправьте нам.\n\n" + f, Text);
+        }
+        catch (Exception ex) { MessageBox.Show(this, "Снимок не получился: " + ex.Message + "\nСфотографируйте экран телефоном.", Text); }
+    }
+
+    void DoOn()
+    {
+        int st = TaskState();
+        if (st == -1 || (last != null && last.Overall == 0 && st > 0)) { RunSetup("ВКЛЮЧИТЬ"); return; }
+        try { TaskSet(true); Log("Доступ включён: задача «Claude туннель» включена и запущена."); Journal(null, "ДОСТУП ВКЛЮЧЁН", "клиент (кнопка)", "этот ПК", "задача «Claude туннель» включена"); }
+        catch (Exception ex) { Log("Не включилось: " + ex.Message + " — запускаю полную установку"); RunSetup("ВКЛЮЧИТЬ"); return; }
+        pending = "кнопка ВКЛЮЧИТЬ";
+        StartCheck();
+    }
+
+    void DoOff()
+    {
+        if (MessageBox.Show(this, "Выключить доступ специалистов к этому компьютеру?\nВключить снова — кнопка «ВКЛЮЧИТЬ».", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        try { TaskSet(false); } catch (Exception ex) { Log("Задача: " + ex.Message); }
+        double up; foreach (int pid in TunnelPids(out up)) { try { Process.GetProcessById(pid).Kill(); } catch { } }
+        Log("Доступ выключен: задача «" + TaskName + "» отключена, соединение с сервером " + SN + " разорвано.");
+        Journal(null, "ДОСТУП ВЫКЛЮЧЕН", "клиент (кнопка)", "этот ПК", "задача отключена, туннель разорван");
+        pending = "кнопка ВЫКЛЮЧИТЬ";
+        StartCheck();
+    }
+
+    void RunSetup(string why)
+    {
+        if (busy) return;
+        busy = true; bOn.Enabled = bOff.Enabled = bFix.Enabled = false;
+        string ph = Regex.Replace(txtPhone.Text, @"\D", "");
+        Log(""); Log("=== " + DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss") + " установка туннеля (кнопка «" + why + "»), займёт 1–3 минуты...");
+        Journal(null, "УСТАНОВКА", "клиент (кнопка «" + why + "»)", "этот ПК", "сотовый: " + (ph != "" ? ph : "не указан"));
+        try
+        {
+            string tmp = Path.Combine(Path.GetTempPath(), "claude_tunnel_setup.ps1");
+            File.WriteAllText(tmp, "[Console]::OutputEncoding = [Text.Encoding]::UTF8\r\n$ProgressPreference = 'SilentlyContinue'\r\n" + Res("setup_core.ps1") + "\r\n" + Res("setup_suffix.ps1"), new UTF8Encoding(true));
+            var psi = new ProcessStartInfo("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File \"" + tmp + "\"")
+            { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true, StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 };
+            psi.EnvironmentVariables["CLAUDE_PHONE"] = ph;
+            var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            p.OutputDataReceived += (s, e) => { if (e.Data != null) { Log(e.Data); Journal(null, "  установка", "", "", e.Data); } };
+            p.ErrorDataReceived += (s, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) { Log("ОШИБКА: " + e.Data); Journal(null, "  установка", "", "", "ОШИБКА: " + e.Data); } };
+            p.Exited += (s, e) => { try { BeginInvoke(new Action(() => { busy = false; bFix.Enabled = true; Log("=== установка закончена. Смотрите статус вверху окна."); try { File.Delete(tmp); } catch { } pending = "установка (кнопка «" + why + "»), код выхода " + p.ExitCode; StartCheck(); })); } catch { } };
+            p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
+        }
+        catch (Exception ex) { busy = false; bFix.Enabled = true; Log("Не запустилась установка: " + ex.Message); }
+    }
+
+    static string Res(string name)
+    {
+        using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream(name)) using (var r = new StreamReader(s, Encoding.UTF8)) return r.ReadToEnd().TrimStart('\uFEFF');
+    }
+
+    void Log(string s)
+    {
+        if (InvokeRequired) { try { BeginInvoke(new Action<string>(Log), s); } catch { } return; }
+        txtLog.AppendText(s + "\r\n");
+    }
+
+    static string GuessPhone()
+    {
+        var m = Regex.Match(Path.GetFileName(Application.ExecutablePath), @"[78]\d{10}");
+        if (m.Success) return "7" + m.Value.Substring(1);
+        string pt = ReadShared(Path.Combine(Dir, "port.txt"));
+        if (!string.IsNullOrEmpty(pt)) { var p = pt.Trim().Split(' '); if (p.Length > 0 && Regex.IsMatch(p[0], @"^7\d{10}$")) return p[0]; }
+        return "";
+    }
+}
+
+// профиль сборки: простой ini — [main] ключ = значение; повторяющиеся разделы [server.1], [server.2], [key.1] …; строки «; …» — комментарии
+class Profile
+{
+    public string Name; readonly List<KeyValuePair<string, string>> kv = new List<KeyValuePair<string, string>>();
+    readonly List<Profile> secs = new List<Profile>();
+    public string Get(string k, string def)
+    {
+        if (Name != null) { foreach (var p in kv) if (p.Key == k) return p.Value; return def; }
+        var m = secs.FirstOrDefault(x => x.Name == "main"); return m == null ? def : m.Get(k, def);
+    }
+    public IEnumerable<string> All(string k) { return kv.Where(p => p.Key == k).Select(p => p.Value); }
+    public IEnumerable<Profile> Sections(string prefix) { return secs.Where(x => x.Name == prefix || x.Name.StartsWith(prefix + ".")); }
+    public static Profile Load()
+    {
+        var root = new Profile(); Profile cur = null;
+        using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("profile.ini"))
+        {
+            if (s == null) return root;
+            using (var r = new StreamReader(s, Encoding.UTF8))
+                for (string ln; (ln = r.ReadLine()) != null; )
+                {
+                    ln = ln.Trim().TrimStart('\uFEFF');
+                    if (ln == "" || ln.StartsWith(";") || ln.StartsWith("#")) continue;
+                    if (ln.StartsWith("[") && ln.EndsWith("]")) { cur = new Profile { Name = ln.Substring(1, ln.Length - 2).Trim().ToLowerInvariant() }; root.secs.Add(cur); continue; }
+                    int e = ln.IndexOf('='); if (e <= 0 || cur == null) continue;
+                    cur.kv.Add(new KeyValuePair<string, string>(ln.Substring(0, e).Trim().ToLowerInvariant(), ln.Substring(e + 1).Trim()));
+                }
+        }
+        return root;
+    }
+}
