@@ -1,4 +1,4 @@
-﻿// Туннель Claude — окно для клиента: проверка ПК встроенным Защитником Windows (без удаления, с отчётом) и обратный SSH-туннель
+﻿// Мост (Туннель Claude) — окно для клиента: проверка ПК встроенным Защитником Windows (без удаления, с отчётом) и обратный SSH-туннель
 // для удалённого обслуживания 1С. Кнопки ВКЛЮЧИТЬ / ВЫКЛЮЧИТЬ / ПОЧИНИТЬ, крупный статус «туннель поднят или нет и почему»,
 // пинг до серверов специалистов (с флагами), Radmin VPN как запасной путь, снимок окна, журнал «кто заходил и что делал»
 // на рабочем столе (понятен любому ИИ), лог запуска и ошибок специалистам (галочка). Установку делает встроенный скрипт туннеля.
@@ -64,7 +64,7 @@ class MainForm : Form
     // профиль сборки (profile.ini, вшит ресурсом): сервер, порт, имена, ключи специалистов, серверы с флагами
     static readonly Profile Pf = Profile.Load();
     static readonly string Rel = Pf.Get("rel", "версия 102");
-    static readonly string AppName = Pf.Get("app_name", "Туннель Claude");   // имя в окне (у нас — «Мост», 12483)
+    static readonly string AppName = Pf.Get("app_name", "Мост");   // имя в окне и журнале (Михаил, 12483, 12501)
     static readonly string SrvIp = Pf.Get("host", ""); static readonly int SrvPort = int.Parse(Pf.Get("port", "22")); static readonly string TaskName = Pf.Get("task_name", "Claude туннель");
     static readonly string SN = Pf.Get("srv_name", "поддержки"), HostAlias = Pf.Get("host_alias", "claude16");
     static readonly string TunnelUser = Pf.Get("tunnel_user", "claude_tunnel"), EnrollUser = Pf.Get("enroll_user", "claude_enroll");
@@ -172,7 +172,7 @@ class MainForm : Form
         BuildCompact();
 
         txtPhone.Text = GuessPhone();
-        Log("Программа «Туннель Claude» " + Rel + ". Журнал входов: " + JournalPath);
+        Log("Программа «" + AppName + "» " + Rel + ". Журнал входов: " + JournalPath);
         EnsureJournal();
         tm = new System.Windows.Forms.Timer { Interval = 5000 };
         tm.Tick += delegate { StartCheck(); };
@@ -510,12 +510,12 @@ class MainForm : Form
 
     // ---------- журнал на рабочем столе ----------
     static readonly string Header =
-        "ЖУРНАЛ ДОСТУПА СПЕЦИАЛИСТОВ К ЭТОМУ КОМПЬЮТЕРУ (программа «Туннель Claude»)\r\n" +
+        "ЖУРНАЛ ДОСТУПА СПЕЦИАЛИСТОВ К ЭТОМУ КОМПЬЮТЕРУ (программа «" + AppName + "»)\r\n" +
         "Что это: вы сами установили программу, чтобы " + Org + " могли помочь вам удалённо.\r\n" +
         "Сюда пишется само: когда доступ включали и выключали, кто заходил (по какому ключу), откуда и какие команды выполнял.\r\n" +
         "Полные записи каждого входа (команды и ответы компьютера) — в папке C:\\ProgramData\\ClaudeTunnel\\sessions.\r\n" +
         "Этот файл можно отправить любому ИИ (ChatGPT, Claude, Алиса и др.) с вопросом «что делали на моём компьютере?».\r\n" +
-        "Выключить доступ в любой момент — кнопка «ВЫКЛЮЧИТЬ» в программе «Туннель Claude».\r\n" +
+        "Выключить доступ в любой момент — кнопка «ВЫКЛЮЧИТЬ» в программе «" + AppName + "».\r\n" +
         "Формат строки: дата время | событие | кто | откуда | подробности\r\n" +
         "--------------------------------------------------------------------------------\r\n";
 
@@ -922,7 +922,7 @@ class MainForm : Form
     {
         var sb = new StringBuilder();
         sb.Append("STATUS: ").Append(last != null ? last.Head.Replace("\n", " / ") : "нет данных").Append("\n");
-        sb.Append("Программа «Туннель Claude» ").Append(Rel).Append(" · повод: ").Append(why).Append("\n");
+        sb.Append("Программа «" + AppName + "» ").Append(Rel).Append(" · повод: ").Append(why).Append("\n");
         sb.Append("Время ПК: ").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss zzz")).Append(" · ПК: ").Append(Environment.MachineName)
           .Append(" · пользователь: ").Append(Environment.UserName).Append(" · сотовый: ").Append(txtPhone.Text).Append("\n");
         sb.Append("Windows: ").Append(WinName()).Append(" · ").Append(Environment.Is64BitOperatingSystem ? "64" : "32").Append("-бит · .NET ").Append(Environment.Version).Append("\n");
@@ -960,7 +960,7 @@ class MainForm : Form
         {
             var b = new Bitmap(Width, Height);
             using (var g = Graphics.FromImage(b)) g.CopyFromScreen(Location, Point.Empty, Size);
-            string f = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "Туннель Claude снимок " + DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss") + ".png");
+            string f = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), AppName + " снимок " + DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss") + ".png");
             b.Save(f, System.Drawing.Imaging.ImageFormat.Png);
             Clipboard.SetImage(b);
             pending = "кнопка СНИМОК ДЛЯ НАС"; StartCheck();

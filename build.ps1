@@ -1,4 +1,4 @@
-﻿# Сборка «Туннель Claude» из профиля: powershell -ExecutionPolicy Bypass -File build.ps1 [-Ini profile.ini]
+﻿# Сборка «Мост» из профиля: powershell -ExecutionPolicy Bypass -File build.ps1 [-Ini profile.ini]
 # Берёт profile.ini + enroll_key, подставляет {{...}} в копии ps1 (папка obj\) и собирает TunnelClaude.exe.
 param([string]$Ini = 'profile.ini', [string]$Out = 'TunnelClaude.exe')
 $ErrorActionPreference = 'Stop'
