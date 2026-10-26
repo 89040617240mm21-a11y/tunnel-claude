@@ -31,7 +31,11 @@ static class Program
     {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new MainForm());
+        bool first; var show = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\ClaudeTunnelGuiShow", out first);
+        if (!first && !Environment.GetCommandLineArgs().Any(a => a.StartsWith("--demo"))) { show.Set(); return; }   // уже запущена — показать её окно
+        var f = new MainForm();
+        new Thread(() => { while (true) { show.WaitOne(); try { f.BeginInvoke(new Action(f.FromTray)); } catch { } } }) { IsBackground = true }.Start();
+        Application.Run(f);
     }
 }
 
@@ -84,6 +88,9 @@ class MainForm : Form
     // ход установки для компактного окна (Михаил, 12489): шаг N из 6, полоса до 100 %, последняя строка скрипта
     static readonly string[] StepNames = { "запускаю установку", "SSH на этом ПК", "программа ssh", "личный ключ ПК", "регистрация на сервере", "задача автозапуска", "проверка связи" };
     int stepN; string stepLine = ""; double prog, progShown; DateTime doneAt = DateTime.MinValue; bool doneOk; System.Windows.Forms.Timer anim;
+    static readonly bool IsAdmin = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
+    NotifyIcon tray; bool quitting, trayTold, autoOn; CheckBox chkAuto; Rectangle rAuto;
+    static readonly string AutoTask = AppName + " окно";   // задача «запуск при входе в Windows» (по галочке)
     bool ShowProg { get { return busy || (DateTime.Now - doneAt).TotalSeconds < 5; } }
     Srv[] servers; Result last;
     // компактный вид (Михаил, 12479): тумблер, номер для специалиста, 3 шага; «Подробно» — прежнее окно с таблицами
@@ -95,7 +102,7 @@ class MainForm : Form
         foreach (var k in Pf.Sections("key")) AddKey(k.Get("blob", ""), k.Get("label", ""));
         servers = Pf.Sections("server").Select(s => new Srv(s.Get("name", ""), s.Get("ip", ""), s.Get("radmin", ""), int.Parse(s.Get("tcp", "0")), FlagBy(s.Get("flag", "")))).ToArray();
 
-        Text = AppName + " — " + Rel + " — ПК " + Environment.MachineName;
+        Text = AppName + " — " + Rel + " — ПК " + Environment.MachineName + (IsAdmin ? " — права администратора ✓" : " — БЕЗ прав администратора");
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
         Font = new Font("Segoe UI", 11f);
         ClientSize = new Size(940, 860); MinimumSize = new Size(760, 640);
@@ -116,7 +123,10 @@ class MainForm : Form
             Journal(null, chkSend.Checked ? "ЛОГ СПЕЦИАЛИСТАМ ВКЛЮЧЁН" : "ЛОГ СПЕЦИАЛИСТАМ ВЫКЛЮЧЕН", "клиент (галочка)", "этот ПК", "");
             sendInfo = chkSend.Checked ? "включено" : "выключено галочкой — специалисты не увидят причину ошибки"; sendSt = 3;
         };
-        pPhone.Controls.Add(lblPhone); pPhone.Controls.Add(txtPhone); pPhone.Controls.Add(chkSend);
+        autoOn = AutoGet();
+        chkAuto = new CheckBox { Text = "Запуск с Windows", AutoSize = true, Location = new Point(745, 9), Checked = autoOn };
+        chkAuto.CheckedChanged += delegate { if (chkAuto.Checked != autoOn) AutoSet(chkAuto.Checked); };
+        pPhone.Controls.Add(lblPhone); pPhone.Controls.Add(txtPhone); pPhone.Controls.Add(chkSend); pPhone.Controls.Add(chkAuto);
 
         var pBtn = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 64, Padding = new Padding(6, 6, 6, 4), WrapContents = false, AutoScroll = true };
         bOn = Btn("ВКЛЮЧИТЬ", Color.FromArgb(30, 140, 60), 150);
@@ -164,7 +174,18 @@ class MainForm : Form
         EnsureJournal();
         tm = new System.Windows.Forms.Timer { Interval = 5000 };
         tm.Tick += delegate { StartCheck(); };
-        Shown += delegate { StartCheck(); tm.Start(); };
+        BuildTray();
+        Shown += delegate
+        {
+            StartCheck(); tm.Start();
+            bool startTray = Environment.GetCommandLineArgs().Contains("--autostart");
+            if (File.Exists(SetupFlag) && (DateTime.Now - File.GetLastWriteTime(SetupFlag)).TotalHours < 24)
+            {   // установку оборвала перезагрузка — доводим сами и показываем ход
+                Log("Установка не была закончена (перезагрузка?) — продолжаю.");
+                RunSetup("продолжение после перезагрузки");
+            }
+            else if (startTray) BeginInvoke(new Action(Hide));   // запуск с Windows — тихо в трей
+        };
         Resize += delegate { FitColumns(); };
         FitColumns();
         SetMode(!Environment.GetCommandLineArgs().Contains("--demo-busy") && File.Exists(FullFlag) || Environment.GetCommandLineArgs().Contains("--full"));
@@ -181,7 +202,7 @@ class MainForm : Form
         pCompact.MouseMove += (s, e) =>
         {
             hover = e.Location; pCompact.Invalidate(new Rectangle(0, 0, pCompact.Width, TitleH));
-            pCompact.Cursor = rBtn.Contains(e.Location) || rCode.Contains(e.Location) && CodeShown || rMore.Contains(e.Location) || rLink.Contains(e.Location) ? Cursors.Hand : Cursors.Default;
+            pCompact.Cursor = rBtn.Contains(e.Location) || rCode.Contains(e.Location) && CodeShown || rMore.Contains(e.Location) || rLink.Contains(e.Location) || rAuto.Contains(e.Location) ? Cursors.Hand : Cursors.Default;
         };
         pCompact.MouseDown += (s, e) =>   // тянем окно за верхнюю строку
         {
@@ -199,6 +220,7 @@ class MainForm : Form
                 try { Clipboard.SetText("Номер для специалиста: " + last.Port + ", ПК " + Environment.MachineName); copied = true; pCompact.Invalidate(); } catch { }
             }
             else if (rLink.Contains(e.Location)) { try { Process.Start(SourceUrl); } catch { } }
+            else if (rAuto.Contains(e.Location)) { AutoSet(!autoOn); pCompact.Invalidate(); }
         };
         Controls.Add(pCompact); pCompact.BringToFront();
         Resize += delegate { if (pCompact.Visible) Corners(); };
@@ -307,6 +329,14 @@ class MainForm : Form
         using (var pen = new Pen(Color.FromArgb(90, 0, 0, 0))) g.DrawLine(pen, 0, TitleH - 1, w, TitleH - 1);
         try { using (var ic = new Icon(Icon, 24, 24)) g.DrawIcon(ic, new Rectangle(12, (TitleH - 24) / 2, 24, 24)); } catch { }
         using (var f = new Font("Segoe UI", 11.5f)) g.DrawString(AppName, f, Brushes.White, 44, (TitleH - f.Height) / 2f);
+        using (var f = new Font("Segoe UI", 9.5f, FontStyle.Bold))
+        {   // плашка прав: зелёная «админ ✓» или красная «нет прав админа»
+            string at = IsAdmin ? "админ ✓" : "нет прав админа";
+            float ax; using (var f0 = new Font("Segoe UI", 11.5f)) ax = 44 + g.MeasureString(AppName, f0).Width + 8;
+            var sz = g.MeasureString(at, f); var ar = new RectangleF(ax, (TitleH - 22) / 2f, sz.Width + 12, 22);
+            using (var pth = Round(ar, 11)) using (var br = new SolidBrush(IsAdmin ? Color.FromArgb(46, 140, 60) : Color.FromArgb(196, 43, 28))) g.FillPath(br, pth);
+            g.DrawString(at, f, Brushes.White, ar.X + 6, ar.Y + (22 - sz.Height) / 2);
+        }
         rClose = new Rectangle(w - 46, 0, 46, TitleH); rMax = new Rectangle(w - 92, 0, 46, TitleH); rMin = new Rectangle(w - 138, 0, 46, TitleH);
         foreach (var rb in new[] { rMin, rMax, rClose })
             if (rb.Contains(hover)) using (var br = new SolidBrush(rb == rClose ? Color.FromArgb(220, 196, 43, 28) : Color.FromArgb(40, 255, 255, 255))) g.FillRectangle(br, rb);
@@ -378,6 +408,17 @@ class MainForm : Form
         {
             var sz = g.MeasureString("Подробно ▾", f); rMore = new Rectangle((int)(card.Right - sz.Width - 8), (int)card.Bottom + 6, (int)sz.Width, (int)sz.Height);
             Text3D(g, "Подробно ▾", f, br, new RectangleF(rMore.X, rMore.Y, rMore.Width + 12, rMore.Height + 4), new StringFormat());
+        }
+        using (var f = new Font("Segoe UI", 11f)) using (var br = new SolidBrush(Color.FromArgb(255, 215, 160)))
+        {   // галочка «Запуск с Windows»: после перезагрузки (драйверы и т. п.) Мост поднимется сам
+            float x = card.X + 8, y = card.Bottom + 8;
+            var bx = new RectangleF(x, y + 2, 16, 16);
+            using (var bb = new SolidBrush(Color.FromArgb(autoOn ? 230 : 110, autoOn ? 214 : 0, autoOn ? 126 : 0, autoOn ? 18 : 0))) using (var pth = Round(bx, 4)) g.FillPath(bb, pth);
+            using (var pen = new Pen(Color.FromArgb(255, 222, 175), 1.4f)) using (var pth = Round(bx, 4)) g.DrawPath(pen, pth);
+            if (autoOn) using (var pen = new Pen(Color.White, 2.2f)) g.DrawLines(pen, new[] { new PointF(x + 3.5f, y + 10), new PointF(x + 7, y + 13.5f), new PointF(x + 13, y + 6) });
+            var sz = g.MeasureString("Запуск с Windows", f);
+            Text3D(g, "Запуск с Windows", f, br, new RectangleF(x + 22, y, sz.Width + 6, sz.Height + 4), new StringFormat());
+            rAuto = new Rectangle((int)x, (int)y, (int)sz.Width + 26, (int)sz.Height + 4);
         }
         // внизу на картинке — ссылка на открытый код
         string url = SourceUrl.Replace("https://", "");
@@ -749,6 +790,7 @@ class MainForm : Form
     // ---------- лог для специалистов на сервер (версия 102) ----------
     static readonly string GuiDir = Path.Combine(Dir, "gui");
     static readonly string NoLogFlag = Path.Combine(GuiDir, "nolog.flag");
+    static readonly string SetupFlag = Path.Combine(GuiDir, "setup-pending.flag");   // есть — установка шла и не закончилась
     static readonly string FullFlag = Path.Combine(GuiDir, "full.flag");   // есть — окно открывается в подробном виде
     static readonly string HostKeys = string.Join("", Pf.Sections("hostkeys").SelectMany(h => h.All("line")).Select(x => x + "\n"));
     static readonly object slock = new object();
@@ -942,6 +984,48 @@ class MainForm : Form
         StartCheck();
     }
 
+    void BuildTray()
+    {   // крестик сворачивает в трей (Михаил, 12491); выйти — правой кнопкой по значку «Выход»
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("Открыть", null, delegate { FromTray(); });
+        menu.Items.Add("Выход", null, delegate { quitting = true; tray.Visible = false; Close(); });
+        tray = new NotifyIcon { Icon = Icon, Text = AppName, ContextMenuStrip = menu, Visible = true };
+        tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) FromTray(); };
+        FormClosing += (s, e) =>
+        {
+            if (quitting || e.CloseReason != CloseReason.UserClosing || Environment.GetCommandLineArgs().Any(a => a.StartsWith("--demo"))) { tray.Visible = false; return; }
+            e.Cancel = true; Hide();
+            if (!trayTold) { trayTold = true; tray.ShowBalloonTip(4000, AppName, AppName + " работает здесь, у часов. Открыть — щёлкните значок, выйти — правой кнопкой «Выход».", ToolTipIcon.Info); }
+        };
+    }
+    public void FromTray()
+    {
+        Show(); if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+        Activate(); BringToFront();
+    }
+    static int Schtasks(string args)
+    {
+        var p = Process.Start(new ProcessStartInfo("schtasks.exe", args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true });
+        p.StandardOutput.ReadToEnd(); p.StandardError.ReadToEnd(); p.WaitForExit(15000); return p.ExitCode;
+    }
+    static bool AutoGet() { try { return Schtasks("/Query /TN \"" + AutoTask + "\"") == 0; } catch { return false; } }
+    void AutoSet(bool on)
+    {   // задача при входе в Windows с правами администратора (программа их требует, обычная «Автозагрузка» её не пустит)
+        string exe = Application.ExecutablePath, user = Environment.UserDomainName + "\\" + Environment.UserName;
+        int rc = -1;
+        try
+        {
+            rc = on ? Schtasks("/Create /F /TN \"" + AutoTask + "\" /TR \"\\\"" + exe + "\\\" --autostart\" /SC ONLOGON /DELAY 0000:20 /RL HIGHEST /IT /RU \"" + user + "\"")
+                    : Schtasks("/Delete /F /TN \"" + AutoTask + "\"");
+        }
+        catch (Exception ex) { Log("Запуск с Windows: " + ex.Message); }
+        autoOn = AutoGet();
+        if (chkAuto != null && chkAuto.Checked != autoOn) chkAuto.Checked = autoOn;
+        Log(on == autoOn ? (autoOn ? "Запуск с Windows включён: после перезагрузки " + AppName + " откроется сам (в трее) и доведёт незаконченную установку." : "Запуск с Windows выключен.")
+                         : "Запуск с Windows не изменён, код schtasks " + rc);
+        Journal(null, autoOn ? "ЗАПУСК С WINDOWS ВКЛЮЧЁН" : "ЗАПУСК С WINDOWS ВЫКЛЮЧЕН", "клиент (галочка)", "этот ПК", "");
+    }
+
     void Progress(string s)
     {
         if (InvokeRequired) { try { BeginInvoke(new Action<string>(Progress), s); } catch { } return; }
@@ -968,6 +1052,7 @@ class MainForm : Form
     {
         if (busy) return;
         busy = true; bOn.Enabled = bOff.Enabled = bFix.Enabled = false;
+        try { Directory.CreateDirectory(GuiDir); File.WriteAllText(SetupFlag, why + " " + DateTime.Now); } catch { }
         stepN = 0; prog = progShown = 0; stepLine = "займёт 1–3 минуты"; doneAt = DateTime.MinValue; AnimStart();
         string ph = Regex.Replace(txtPhone.Text, @"\D", "");
         Log(""); Log("=== " + DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss") + " установка туннеля (кнопка «" + why + "»), займёт 1–3 минуты...");
@@ -982,7 +1067,7 @@ class MainForm : Form
             var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
             p.OutputDataReceived += (s, e) => { if (e.Data != null) { Log(e.Data); Progress(e.Data); Journal(null, "  установка", "", "", e.Data); } };
             p.ErrorDataReceived += (s, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) { Log("ОШИБКА: " + e.Data); Journal(null, "  установка", "", "", "ОШИБКА: " + e.Data); } };
-            p.Exited += (s, e) => { try { BeginInvoke(new Action(() => { busy = false; bFix.Enabled = true; doneOk = p.ExitCode == 0; doneAt = DateTime.Now; prog = 1; stepLine = doneOk ? "все 6 шагов пройдены" : "ошибка — нажмите «Подробно»"; Log("=== установка закончена. Смотрите статус вверху окна."); try { File.Delete(tmp); } catch { } pending = "установка (кнопка «" + why + "»), код выхода " + p.ExitCode; StartCheck(); })); } catch { } };
+            p.Exited += (s, e) => { try { BeginInvoke(new Action(() => { busy = false; bFix.Enabled = true; doneOk = p.ExitCode == 0; doneAt = DateTime.Now; try { File.Delete(SetupFlag); } catch { } prog = 1; stepLine = doneOk ? "все 6 шагов пройдены" : "ошибка — нажмите «Подробно»"; Log("=== установка закончена. Смотрите статус вверху окна."); try { File.Delete(tmp); } catch { } pending = "установка (кнопка «" + why + "»), код выхода " + p.ExitCode; StartCheck(); })); } catch { } };
             p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
         }
         catch (Exception ex) { busy = false; bFix.Enabled = true; doneOk = false; doneAt = DateTime.Now; stepLine = "установка не запустилась"; Log("Не запустилась установка: " + ex.Message); }
