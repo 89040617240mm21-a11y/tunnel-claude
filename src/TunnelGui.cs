@@ -166,29 +166,58 @@ class MainForm : Form
 
     void BuildCompact()
     {
-        // вид «Закат» (Михаил, 12483): во всё окно картинка с мостом — включено ярко, выключено тускло; поверх полупрозрачная карточка
+        // вид «Закат» (Михаил, 12483–12488): своё тёмное окно со скруглёнными углами, во всё окно картинка с мостом —
+        // включено ярко, выключено тускло; поверх объёмная стеклянная карточка и золотая кнопка
         try { using (var st = Assembly.GetExecutingAssembly().GetManifestResourceStream("bg.jpg")) if (st != null) { bgOn = new Bitmap(st); bgOff = Dim(bgOn); } } catch { }
         pCompact = new Canvas { Dock = DockStyle.Fill, BackColor = Color.FromArgb(40, 30, 28), Visible = false };
         pCompact.Paint += (s, e) => PaintCompact(e.Graphics);
-        pCompact.MouseMove += (s, e) => { pCompact.Cursor = rBtn.Contains(e.Location) || rCode.Contains(e.Location) && CodeShown || rMore.Contains(e.Location) ? Cursors.Hand : Cursors.Default; };
+        pCompact.MouseLeave += delegate { hover = Point.Empty; pCompact.Invalidate(); };
+        pCompact.MouseMove += (s, e) =>
+        {
+            hover = e.Location; pCompact.Invalidate(new Rectangle(0, 0, pCompact.Width, TitleH));
+            pCompact.Cursor = rBtn.Contains(e.Location) || rCode.Contains(e.Location) && CodeShown || rMore.Contains(e.Location) || rLink.Contains(e.Location) ? Cursors.Hand : Cursors.Default;
+        };
+        pCompact.MouseDown += (s, e) =>   // тянем окно за верхнюю строку
+        {
+            if (e.Button == MouseButtons.Left && e.Y < TitleH && !rMin.Contains(e.Location) && !rMax.Contains(e.Location) && !rClose.Contains(e.Location))
+            { ReleaseCapture(); SendMessage(Handle, 0xA1, (IntPtr)2, IntPtr.Zero); }
+        };
         pCompact.MouseClick += (s, e) =>
         {
-            if (rBtn.Contains(e.Location)) { if (busy || last == null) return; if (last.TaskSt > 0 && last.Overall != 0) DoOff(); else DoOn(); }
+            if (rClose.Contains(e.Location)) Close();
+            else if (rMin.Contains(e.Location)) WindowState = FormWindowState.Minimized;
+            else if (rMax.Contains(e.Location) || rMore.Contains(e.Location)) SetMode(true);
+            else if (rBtn.Contains(e.Location)) { if (busy || last == null) return; if (last.TaskSt > 0 && last.Overall != 0) DoOff(); else DoOn(); }
             else if (rCode.Contains(e.Location) && CodeShown)
             {
                 try { Clipboard.SetText("Номер для специалиста: " + last.Port + ", ПК " + Environment.MachineName); copied = true; pCompact.Invalidate(); } catch { }
             }
-            else if (rMore.Contains(e.Location)) SetMode(true);
+            else if (rLink.Contains(e.Location)) { try { Process.Start(SourceUrl); } catch { } }
         };
         Controls.Add(pCompact); pCompact.BringToFront();
+        Resize += delegate { if (pCompact.Visible) Corners(); };
 
         var bBack = Btn("Компактно ▴", Color.FromArgb(120, 120, 120), 140);   // из подробного вида — обратно
         bBack.Click += delegate { SetMode(false); };
         bJournal.Parent.Controls.Add(bBack);
     }
 
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool ReleaseCapture();
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
+    protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ClassStyle |= 0x20000; return cp; } }   // тень вокруг окна
+
+    void Corners()   // скруглённые углы: Windows 11 рисует сама и гладко, на 7/10 — вырезаем окно по скруглённой рамке
+    {
+        int round = 2, r = -1;
+        try { r = DwmSetWindowAttribute(Handle, 33, ref round, 4); } catch { }
+        if (r == 0) { Region = null; return; }
+        using (var path = Round(new RectangleF(0, 0, Width, Height), 12)) Region = new Region(path);
+    }
+
     class Canvas : Panel { public Canvas() { DoubleBuffered = true; ResizeRedraw = true; } }
-    Bitmap bgOn, bgOff; Rectangle rBtn, rCode, rMore;
+    const int TitleH = 40;
+    Bitmap bgOn, bgOff; Rectangle rBtn, rCode, rMore, rLink, rMin, rMax, rClose; Point hover;
     bool CodeShown { get { return last != null && last.TaskSt > 0 && last.Port != ""; } }
 
     static Bitmap Dim(Bitmap src)   // «мост погас»: почти без цвета и темнее
@@ -212,57 +241,118 @@ class MainForm : Form
         p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); p.AddArc(r.X, r.Bottom - d, d, d, 90, 90); p.CloseFigure(); return p;
     }
 
+    static void Shadow(Graphics g, RectangleF r, float rad, int depth, int alpha)   // мягкая тень под предметом — «объём»
+    {
+        for (int i = depth; i >= 1; i--)
+            using (var p = Round(new RectangleF(r.X - i * 0.6f, r.Y + i * 0.9f, r.Width + i * 1.2f, r.Height + i * 0.6f), rad + i * 0.6f))
+            using (var br = new SolidBrush(Color.FromArgb(alpha / depth + 2, 0, 0, 0))) g.FillPath(br, p);
+    }
+
+    static void Text3D(Graphics g, string t, Font f, Brush br, RectangleF r, StringFormat sf)   // буквы с тенью
+    {
+        using (var sh = new SolidBrush(Color.FromArgb(130, 0, 0, 0))) g.DrawString(t, f, sh, new RectangleF(r.X + 1, r.Y + 2, r.Width, r.Height), sf);
+        g.DrawString(t, f, br, r, sf);
+    }
+
     void PaintCompact(Graphics g)
     {
         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias; g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-        int w = pCompact.ClientSize.Width, h = pCompact.ClientSize.Height;
+        int w = pCompact.ClientSize.Width, h = pCompact.ClientSize.Height, ih = h - TitleH;
         bool on = last != null && last.TaskSt > 0, lit = on && last.Overall == 1;
         var bg = lit ? bgOn : bgOff;
         if (bg != null)
-        {   // картинку растягиваем по ширине, низ (облака) уходит под карточку
-            float sc = Math.Max((float)w / bg.Width, (float)h / bg.Height);
+        {   // картинка по ширине окна под тёмной строкой заголовка
+            float sc = Math.Max((float)w / bg.Width, (float)ih / bg.Height);
             g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-            g.DrawImage(bg, (w - bg.Width * sc) / 2, 0, bg.Width * sc, bg.Height * sc);
+            g.DrawImage(bg, (w - bg.Width * sc) / 2, TitleH, bg.Width * sc, bg.Height * sc);
         }
-        else using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(new Rectangle(0, 0, w, h), Color.FromArgb(lit ? 250 : 120, lit ? 150 : 110, lit ? 60 : 100), Color.FromArgb(40, 30, 28), 90f)) g.FillRectangle(lg, 0, 0, w, h);
-
-        var card = new RectangleF(w * 0.085f, h * 0.470f, w * 0.83f, h * 0.43f);   // там же, где карточка на наброске Б
-        using (var p = Round(card, 18)) { using (var br = new SolidBrush(Color.FromArgb(110, 30, 22, 18))) g.FillPath(br, p); using (var pen = new Pen(Color.FromArgb(90, 255, 225, 180), 1.5f)) g.DrawPath(pen, p); }
+        else using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(new Rectangle(0, TitleH, w, ih), Color.FromArgb(lit ? 250 : 120, lit ? 150 : 110, lit ? 60 : 100), Color.FromArgb(40, 30, 28), 90f)) g.FillRectangle(lg, 0, TitleH, w, ih);
         var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
 
-        Color[] dot = { Color.FromArgb(240, 70, 60), Color.FromArgb(80, 220, 100), Color.FromArgb(255, 190, 40), Color.FromArgb(170, 170, 170) };
+        // верхняя строка — тёмная, как на наброске: значок, имя, свёрнуть / подробно / закрыть
+        using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(new Rectangle(0, 0, w, TitleH), Color.FromArgb(58, 54, 54), Color.FromArgb(38, 35, 35), 90f)) g.FillRectangle(lg, 0, 0, w, TitleH);
+        using (var pen = new Pen(Color.FromArgb(90, 0, 0, 0))) g.DrawLine(pen, 0, TitleH - 1, w, TitleH - 1);
+        try { using (var ic = new Icon(Icon, 24, 24)) g.DrawIcon(ic, new Rectangle(12, (TitleH - 24) / 2, 24, 24)); } catch { }
+        using (var f = new Font("Segoe UI", 11.5f)) g.DrawString(AppName, f, Brushes.White, 44, (TitleH - f.Height) / 2f);
+        rClose = new Rectangle(w - 46, 0, 46, TitleH); rMax = new Rectangle(w - 92, 0, 46, TitleH); rMin = new Rectangle(w - 138, 0, 46, TitleH);
+        foreach (var rb in new[] { rMin, rMax, rClose })
+            if (rb.Contains(hover)) using (var br = new SolidBrush(rb == rClose ? Color.FromArgb(220, 196, 43, 28) : Color.FromArgb(40, 255, 255, 255))) g.FillRectangle(br, rb);
+        using (var pen = new Pen(Color.FromArgb(225, 225, 225), 1.2f))
+        {
+            float cy = TitleH / 2f;
+            g.DrawLine(pen, rMin.X + 18, cy, rMin.X + 28, cy);
+            g.DrawRectangle(pen, rMax.X + 18, cy - 5, 10, 10);
+            g.DrawLine(pen, rClose.X + 18, cy - 5, rClose.X + 28, cy + 5); g.DrawLine(pen, rClose.X + 28, cy - 5, rClose.X + 18, cy + 5);
+        }
+
+        // стеклянная карточка с тенью и светлой кромкой сверху
+        var card = new RectangleF(w * 0.085f, TitleH + ih * 0.47f, w * 0.83f, ih * 0.43f);
+        Shadow(g, card, 18, 10, 110);
+        using (var p = Round(card, 18))
+        {
+            using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(card, Color.FromArgb(120, 70, 55, 48), Color.FromArgb(165, 22, 17, 14), 90f)) g.FillPath(lg, p);
+            using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(card, Color.FromArgb(150, 255, 236, 205), Color.FromArgb(25, 255, 236, 205), 90f))
+            using (var pen = new Pen(lg, 1.6f)) g.DrawPath(pen, p);
+        }
+
+        Color[] dot = { Color.FromArgb(240, 70, 60), Color.FromArgb(90, 230, 90), Color.FromArgb(255, 190, 40), Color.FromArgb(170, 170, 170) };
         string head = AppName + (lit ? " открыт" : " закрыт");   // только два слова: открыт / закрыт (Михаил, 12487), подробности — строкой ниже
         using (var f = new Font("Segoe UI", 24f, FontStyle.Bold))
         {
-            var sz = g.MeasureString(head, f); float x = (w - sz.Width - 26) / 2, y = card.Y + 20;
-            using (var br = new SolidBrush(last == null ? dot[3] : busy ? dot[2] : !on ? dot[3] : dot[last.Overall])) g.FillEllipse(br, x, y + sz.Height / 2 - 9, 18, 18);
-            g.DrawString(head, f, Brushes.White, x + 26, y);
+            var sz = g.MeasureString(head, f); float x = (w - sz.Width - 30) / 2, y = card.Y + 18, cy = y + sz.Height / 2;
+            var dc = last == null ? dot[3] : busy ? dot[2] : !on ? dot[3] : dot[last.Overall];
+            using (var br = new SolidBrush(Color.FromArgb(70, dc))) g.FillEllipse(br, x - 5, cy - 14, 28, 28);   // свечение
+            using (var path = new System.Drawing.Drawing2D.GraphicsPath())
+            {   // шарик: светлый блик слева сверху
+                path.AddEllipse(x, cy - 9, 18, 18);
+                using (var pg = new System.Drawing.Drawing2D.PathGradientBrush(path) { CenterPoint = new PointF(x + 6, cy - 4), CenterColor = ControlPaint.Light(dc, 0.8f), SurroundColors = new[] { dc } }) g.FillPath(pg, path);
+            }
+            Text3D(g, head, f, Brushes.White, new RectangleF(x + 28, y, sz.Width + 4, sz.Height), new StringFormat());
         }
         string code = last == null ? "проверяю..." : busy ? "подождите..." : lit && CodeShown ? "Номер: " + last.Port : !on ? "нажмите «Включить»" : last.Overall == 2 ? "подключаюсь..." : "нет связи — нажмите «Включить»";
         rCode = new Rectangle((int)card.X, (int)card.Y + 72, (int)card.Width, 56);
-        using (var f = new Font("Segoe UI", lit && CodeShown ? 25f : 14f, FontStyle.Bold)) g.DrawString(code, f, Brushes.White, rCode, center);
+        using (var f = new Font("Segoe UI", lit && CodeShown ? 25f : 14f, FontStyle.Bold)) Text3D(g, code, f, Brushes.White, rCode, center);
         if (CodeShown && copied)
             using (var f = new Font("Segoe UI", 10.5f)) using (var br = new SolidBrush(Color.FromArgb(255, 215, 160)))
                 g.DrawString("Скопировано — вставьте в чат (Ctrl+V)", f, br, new RectangleF(card.X, card.Y + 124, card.Width, 22), center);
 
-        rBtn = new Rectangle((int)card.X + 24, (int)(card.Bottom - 76), (int)card.Width - 48, 58);
-        bool off = on && last.Overall != 0;
+        // золотая кнопка: тень, градиент, стеклянный блик сверху, тёмная кромка
+        rBtn = new Rectangle((int)card.X + 24, (int)(card.Bottom - 78), (int)card.Width - 48, 58);
+        bool off = on && last.Overall != 0, hot = rBtn.Contains(hover) && !busy;
+        Shadow(g, rBtn, 14, 6, 120);
         using (var p = Round(rBtn, 14))
-        using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(rBtn, Color.FromArgb(busy ? 150 : 255, busy ? 140 : 196, busy ? 130 : 80), Color.FromArgb(busy ? 110 : 226, busy ? 100 : 128, busy ? 95 : 20), 90f))
-            g.FillPath(lg, p);
+        {
+            Color c1 = busy ? Color.FromArgb(150, 140, 130) : hot ? Color.FromArgb(255, 212, 110) : Color.FromArgb(255, 200, 88);
+            Color c2 = busy ? Color.FromArgb(110, 100, 95) : hot ? Color.FromArgb(232, 140, 30) : Color.FromArgb(214, 118, 14);
+            using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(rBtn, c1, c2, 90f)) g.FillPath(lg, p);
+            var gl = new RectangleF(rBtn.X + 3, rBtn.Y + 2, rBtn.Width - 6, rBtn.Height * 0.48f);
+            using (var gp = Round(gl, 11)) using (var lg = new System.Drawing.Drawing2D.LinearGradientBrush(gl, Color.FromArgb(110, 255, 255, 255), Color.FromArgb(10, 255, 255, 255), 90f)) g.FillPath(lg, gp);
+            using (var pen = new Pen(Color.FromArgb(160, 150, 75, 5), 1.4f)) g.DrawPath(pen, p);
+        }
         string bt = busy ? "Подождите..." : off ? "Отключить" : "Включить";
         using (var f = new Font("Segoe UI", 16f, FontStyle.Bold))
         {
-            var sz = g.MeasureString(bt, f); float x = rBtn.X + (rBtn.Width - sz.Width - 34) / 2, cy = rBtn.Y + rBtn.Height / 2f;
-            using (var pen = new Pen(Color.White, 3.2f) { StartCap = System.Drawing.Drawing2D.LineCap.Round, EndCap = System.Drawing.Drawing2D.LineCap.Round })
-            { g.DrawArc(pen, x, cy - 11, 22, 22, -60, 300); g.DrawLine(pen, x + 11, cy - 15, x + 11, cy - 3); }   // значок питания
-            g.DrawString(bt, f, Brushes.White, x + 34, cy - sz.Height / 2);
+            var sz = g.MeasureString(bt, f); float x = rBtn.X + (rBtn.Width - sz.Width - 36) / 2, cy = rBtn.Y + rBtn.Height / 2f;
+            for (int k = 1; k >= 0; k--)   // значок питания с тенью
+                using (var pen = new Pen(k == 1 ? Color.FromArgb(110, 90, 40, 0) : Color.White, 3.2f) { StartCap = System.Drawing.Drawing2D.LineCap.Round, EndCap = System.Drawing.Drawing2D.LineCap.Round })
+                { g.DrawArc(pen, x + k, cy - 11 + 2 * k, 22, 22, -60, 300); g.DrawLine(pen, x + 11 + k, cy - 15 + 2 * k, x + 11 + k, cy - 3 + 2 * k); }
+            using (var sh = new SolidBrush(Color.FromArgb(110, 90, 40, 0))) g.DrawString(bt, f, sh, x + 37, cy - sz.Height / 2 + 2);
+            g.DrawString(bt, f, Brushes.White, x + 36, cy - sz.Height / 2);
         }
 
         using (var f = new Font("Segoe UI", 11f, FontStyle.Underline)) using (var br = new SolidBrush(Color.FromArgb(255, 215, 160)))
         {
-            var sz = g.MeasureString("Подробно ▾", f); rMore = new Rectangle((int)(card.Right - sz.Width), (int)card.Bottom + 8, (int)sz.Width, (int)sz.Height);
-            g.DrawString("Подробно ▾", f, br, rMore.X, rMore.Y);
+            var sz = g.MeasureString("Подробно ▾", f); rMore = new Rectangle((int)(card.Right - sz.Width - 8), (int)card.Bottom + 6, (int)sz.Width, (int)sz.Height);
+            Text3D(g, "Подробно ▾", f, br, new RectangleF(rMore.X, rMore.Y, rMore.Width + 12, rMore.Height + 4), new StringFormat());
+        }
+        // внизу на картинке — ссылка на открытый код
+        string url = SourceUrl.Replace("https://", "");
+        using (var f = new Font("Segoe UI", 10f)) using (var fu = new Font("Segoe UI", 10f, FontStyle.Underline))
+        {
+            float a = g.MeasureString("Открытый код: ", f).Width, bw = g.MeasureString(url, fu).Width, x = (w - a - bw) / 2, y = h - 30;
+            Text3D(g, "Открытый код: ", f, Brushes.White, new RectangleF(x, y, a + 4, 22), new StringFormat());
+            using (var br = new SolidBrush(Color.FromArgb(255, 222, 175))) Text3D(g, url, fu, br, new RectangleF(x + a - 4, y, bw + 4, 22), new StringFormat());
+            rLink = new Rectangle((int)(x + a - 4), (int)y, (int)bw, 22);
         }
     }
 
@@ -270,7 +360,9 @@ class MainForm : Form
     {
         SuspendLayout();
         foreach (var c in full) c.Visible = isFull;
-        pCompact.Visible = !isFull;
+        pCompact.Visible = !isFull; lnkSrc.Visible = isFull;   // в компактном ссылка нарисована на картинке
+        FormBorderStyle = isFull ? FormBorderStyle.Sizable : FormBorderStyle.None;   // компактный — своё тёмное окно со скруглёнными углами
+        if (isFull) Region = null;
         string url = isFull ? SourceUrl : SourceUrl.Replace("https://", "");
         lnkSrc.Text = (isFull ? "Открытый код программы (проверить, что она делает): " : "Открытый код: ") + url;
         lnkSrc.LinkArea = new LinkArea(lnkSrc.Text.Length - url.Length, url.Length);
@@ -279,7 +371,7 @@ class MainForm : Form
         lnkSrc.BackColor = isFull ? Color.White : Color.FromArgb(28, 22, 20); lnkSrc.ForeColor = isFull ? SystemColors.ControlText : Color.FromArgb(200, 190, 180);
         lnkSrc.LinkColor = isFull ? Color.FromArgb(0, 102, 204) : Color.FromArgb(255, 215, 160);
         if (isFull) { MinimumSize = new Size(760, 640); ClientSize = new Size(940, 860); }
-        else { MinimumSize = new Size(420, 560); ClientSize = new Size(480, 617); }
+        else { MinimumSize = new Size(420, 560); ClientSize = new Size(480, 623); Corners(); }
         try { Directory.CreateDirectory(GuiDir); if (isFull) File.WriteAllText(FullFlag, "подробный вид"); else File.Delete(FullFlag); } catch { }
         ResumeLayout(); FitColumns();
         if (IsHandleCreated) CenterToScreen();
