@@ -231,16 +231,16 @@ class MainForm : Form
         var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
 
         Color[] dot = { Color.FromArgb(240, 70, 60), Color.FromArgb(80, 220, 100), Color.FromArgb(255, 190, 40), Color.FromArgb(170, 170, 170) };
-        string head = last == null ? "Проверяю..." : busy ? "Устанавливаю..." : last.TaskSt == -1 ? "Не установлен" : !on ? AppName + " закрыт" : last.Overall == 1 ? AppName + " открыт" : last.Overall == 2 ? "Подключаюсь..." : "Нет связи";
+        string head = AppName + (lit ? " открыт" : " закрыт");   // только два слова: открыт / закрыт (Михаил, 12487), подробности — строкой ниже
         using (var f = new Font("Segoe UI", 24f, FontStyle.Bold))
         {
             var sz = g.MeasureString(head, f); float x = (w - sz.Width - 26) / 2, y = card.Y + 20;
             using (var br = new SolidBrush(last == null ? dot[3] : busy ? dot[2] : !on ? dot[3] : dot[last.Overall])) g.FillEllipse(br, x, y + sz.Height / 2 - 9, 18, 18);
             g.DrawString(head, f, Brushes.White, x + 26, y);
         }
-        string code = CodeShown ? "Номер: " + last.Port : last != null && last.TaskSt == -1 ? "нажмите «Включить»" : on ? "номер появится через минуту" : "специалисты не могут зайти";
+        string code = last == null ? "проверяю..." : busy ? "подождите..." : lit && CodeShown ? "Номер: " + last.Port : !on ? "нажмите «Включить»" : last.Overall == 2 ? "подключаюсь..." : "нет связи — нажмите «Включить»";
         rCode = new Rectangle((int)card.X, (int)card.Y + 72, (int)card.Width, 56);
-        using (var f = new Font("Segoe UI", CodeShown ? 25f : 14f, FontStyle.Bold)) g.DrawString(code, f, Brushes.White, rCode, center);
+        using (var f = new Font("Segoe UI", lit && CodeShown ? 25f : 14f, FontStyle.Bold)) g.DrawString(code, f, Brushes.White, rCode, center);
         if (CodeShown && copied)
             using (var f = new Font("Segoe UI", 10.5f)) using (var br = new SolidBrush(Color.FromArgb(255, 215, 160)))
                 g.DrawString("Скопировано — вставьте в чат (Ctrl+V)", f, br, new RectangleF(card.X, card.Y + 124, card.Width, 22), center);
