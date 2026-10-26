@@ -360,7 +360,7 @@ class MainForm : Form
         }
 
         Color[] dot = { Color.FromArgb(240, 70, 60), Color.FromArgb(90, 230, 90), Color.FromArgb(255, 190, 40), Color.FromArgb(170, 170, 170) };
-        string head = AppName + (busy ? " открывается" : lit ? " открыт" : " закрыт");   // только два слова: открыт / закрыт (Михаил, 12487), подробности — строкой ниже
+        string head = busy ? Pf.Get("state_busy", AppName + " открывается") : lit ? Pf.Get("state_on", AppName + " открыт") : Pf.Get("state_off", AppName + " закрыт");   // два слова (Михаил, 12487); у имени другого рода — свои слова в профиле (12504), подробности — строкой ниже
         using (var f = new Font("Segoe UI", 24f, FontStyle.Bold))
         {
             var sz = g.MeasureString(head, f); float x = (w - sz.Width - 30) / 2, y = card.Y + 18, cy = y + sz.Height / 2;
