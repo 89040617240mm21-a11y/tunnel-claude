@@ -89,6 +89,9 @@ class MainForm : Form
     static readonly string[] StepNames = { "запускаю установку", "SSH на этом ПК", "программа ssh", "личный ключ ПК", "регистрация на сервере", "задача автозапуска", "проверка связи" };
     int stepN; string stepLine = ""; double prog, progShown; DateTime doneAt = DateTime.MinValue; bool doneOk; System.Windows.Forms.Timer anim;
     static readonly bool IsAdmin = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
+    static readonly string AutoOffFlag = Path.Combine(GuiDir, "auto-off.flag");   // есть — человек сам снял галочку «Запуск с Windows», обратно не ставим
+    static bool Demo { get { return Environment.GetCommandLineArgs().Any(a => a.StartsWith("--demo")); } }
+    bool autoTried;
     NotifyIcon tray; bool quitting, trayTold, autoOn; CheckBox chkAuto; Rectangle rAuto;
     static readonly string AutoTask = AppName + " окно";   // задача «запуск при входе в Windows» (по галочке)
     bool ShowProg { get { return busy || (DateTime.Now - doneAt).TotalSeconds < 5; } }
@@ -178,6 +181,7 @@ class MainForm : Form
         Shown += delegate
         {
             StartCheck(); tm.Start();
+            if (!autoOn && !File.Exists(AutoOffFlag) && !Demo) AutoSet(true);
             bool startTray = Environment.GetCommandLineArgs().Contains("--autostart");
             if (File.Exists(SetupFlag) && (DateTime.Now - File.GetLastWriteTime(SetupFlag)).TotalHours < 24)
             {   // установку оборвала перезагрузка — доводим сами и показываем ход
@@ -768,6 +772,15 @@ class MainForm : Form
         if (Environment.GetCommandLineArgs().Contains("--demo-busy") && !busy) { busy = true; stepN = 3; prog = progShown = 0.42; stepLine = "3/6 Личный ключ этого ПК..."; }   // снимок хода установки
         if (Environment.GetCommandLineArgs().Contains("--demo")) { r.TaskSt = 1; r.Overall = 1; r.Port = "22045"; }   // снимки для сайта: вид «открыт», ничего не включает
         last = r;
+        if (!autoTried)
+        {
+            autoTried = true;
+            if (!Demo && !busy && !Environment.GetCommandLineArgs().Contains("--autostart") && (r.TaskSt <= 0 || r.Overall == 0))
+            {
+                Log("Мост не открыт — открываю сам (запуск программы).");
+                BeginInvoke(new Action(DoOn));
+            }
+        }
         Color[] cs = { Color.FromArgb(200, 35, 35), Color.FromArgb(25, 140, 55), Color.FromArgb(215, 140, 0), Color.FromArgb(110, 110, 110) };
         lblStatus.BackColor = cs[r.Overall]; lblStatus.Text = r.Head;
         lblStatus.Font = new Font("Segoe UI", r.Head.Length > 70 ? 15f : 19f, FontStyle.Bold);
@@ -1020,6 +1033,7 @@ class MainForm : Form
         }
         catch (Exception ex) { Log("Запуск с Windows: " + ex.Message); }
         autoOn = AutoGet();
+        try { Directory.CreateDirectory(GuiDir); if (autoOn) File.Delete(AutoOffFlag); else if (!on) File.WriteAllText(AutoOffFlag, "галочку сняли " + DateTime.Now); } catch { }
         if (chkAuto != null && chkAuto.Checked != autoOn) chkAuto.Checked = autoOn;
         Log(on == autoOn ? (autoOn ? "Запуск с Windows включён: после перезагрузки " + AppName + " откроется сам (в трее) и доведёт незаконченную установку." : "Запуск с Windows выключен.")
                          : "Запуск с Windows не изменён, код schtasks " + rc);
