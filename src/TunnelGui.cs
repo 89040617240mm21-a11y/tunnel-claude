@@ -873,6 +873,7 @@ class MainForm : Form
     {
         return new[] {
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"OpenSSH\ssh.exe"),
+            Path.Combine(Dir, @"ssh95\Program Files\OpenSSH\ssh.exe"),   // свой 9.5 вместо встроенного 7.7, который рвёт вход (12539)
             Path.Combine(Environment.SystemDirectory, @"OpenSSH\ssh.exe"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), @"Sysnative\OpenSSH\ssh.exe") }.FirstOrDefault(File.Exists);
     }

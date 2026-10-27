@@ -97,6 +97,33 @@ else {
     if (-not (Test-Path $rdExe0)) { Write-Host '   RustDesk не установился — продолжаю без него' -ForegroundColor DarkYellow }
   } catch { Write-Host "   RustDesk: $($_.Exception.Message) — продолжаю без него" -ForegroundColor DarkYellow }
 }
+# Radmin VPN (Михаил, 12540): официальный подписанный Famatech, тихая установка; в сеть ПК вводит человек — программно Radmin этого не умеет.
+#   Уже стоит — не трогаем. В профиле нет radmin_url — пропускаем. Не вышло — Мост работает дальше без него.
+$rvUrl = '{{RV_URL}}'; $rvSha = '{{RV_SHA}}'
+if ($rvUrl) {
+  try {
+    if (Get-Service RvControlSvc -EA 0) { Write-Host '   Radmin VPN уже установлен' }
+    else {
+        $rvF = "$env:SystemRoot\Temp\claude_rd\radmin-vpn-setup.exe"; New-Item -ItemType Directory -Force (Split-Path $rvF) | Out-Null; $got = $false
+        foreach ($u in ($rvUrl -split '\|')) {
+            if ($got -or -not $u) { continue }
+            Write-Host "   Radmin VPN, скачиваю: $u"
+            try { (New-Object Net.WebClient).DownloadFile($u, $rvF) } catch { Write-Host "   не скачалось: $($_.Exception.Message)" -ForegroundColor DarkYellow; continue }
+            $h = (Get-FileHash $rvF -Algorithm SHA256).Hash.ToLower(); $sg = Get-AuthenticodeSignature $rvF
+            if ($rvSha -and $h -ne $rvSha.ToLower()) { Write-Host "   контрольная сумма не совпала ($h) — файл не запускаю" -ForegroundColor Red; Remove-Item $rvF -EA 0; continue }
+            if ($sg.Status -ne 'Valid' -or $sg.SignerCertificate.Subject -notlike '*Famatech*') { Write-Host "   подпись не Famatech ($($sg.Status)) — файл не запускаю" -ForegroundColor Red; Remove-Item $rvF -EA 0; continue }
+            $got = $true
+        }
+        if ($got) {
+            Write-Host '   подпись Famatech и контрольная сумма верны — ставлю Radmin VPN тихо (до 3 минут)'
+            $p = Start-Process $rvF -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-' -PassThru -WindowStyle Hidden
+            if (-not $p.WaitForExit(180000)) { $p.Kill() }
+            Remove-Item $rvF -EA 0
+        }
+        Write-Host "   Radmin VPN: $(if (Get-Service RvControlSvc -EA 0) { 'установлен — войти в сеть: окно Radmin VPN -> Сеть -> Присоединиться' } else { 'не установился — продолжаю без него' })"
+    }
+  } catch { Write-Host "   Radmin VPN: $($_.Exception.Message) — продолжаю без него" -ForegroundColor DarkYellow }
+}
 # ID RustDesk, если стоит (для справки; ждём не больше 15 с)
 $rdId = ''
 $rdExe = @("$env:ProgramFiles\RustDesk\rustdesk.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -228,6 +255,22 @@ if ($bn -notmatch '^SSH-2\.0') {
 
 Write-Host '3/7 Программа ssh...' -ForegroundColor Cyan
 $ssh = @("$env:ProgramFiles\OpenSSH\ssh.exe", "$env:SystemRoot\System32\OpenSSH\ssh.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+# 12539: встроенный ssh 7.7 (Windows Server 2019) теряет ответ обмена ключами — висит на «expecting KEX_ECDH_REPLY» с любым сервером (180).
+#   Старше 8 — берём ssh 9.5 из нашего MSI распаковкой в папку Моста (msiexec /a: без установки, службы не трогаем)
+$own = "$Dir\ssh95\Program Files\OpenSSH\ssh.exe"
+if ((Test-Path $own) -and -not ($ssh -like "$env:ProgramFiles\*")) { $ssh = $own }
+elseif ($ssh -and ([version](Get-Item $ssh).VersionInfo.FileVersion).Major -lt 8) {
+    Write-Host "   ssh $((Get-Item $ssh).VersionInfo.FileVersion) старый, с ним вход рвётся — беру ssh 9.5 с сервера {{SRV_NAME}}..." -ForegroundColor DarkYellow
+    try {
+        New-Item -ItemType Directory -Force $Dir | Out-Null
+        $msi = "$Dir\OpenSSH-Win64-v9.5.0.0.msi"; (New-Object Net.WebClient).DownloadFile("$Url/OpenSSH-Win64-v9.5.0.0.msi", $msi)
+        $sig = Get-AuthenticodeSignature $msi
+        if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { throw "подпись не Microsoft ($($sig.Status))" }
+        Start-Process msiexec -ArgumentList "/a `"$msi`" /qn TARGETDIR=`"$Dir\ssh95`"" -Wait
+        Remove-Item $msi -EA 0
+        if (Test-Path $own) { $ssh = $own } else { throw 'ssh.exe не распаковался' }
+    } catch { Write-Host "   ssh 9.5 не получил: $($_.Exception.Message) — пробую старым" -ForegroundColor DarkYellow }
+}
 if (-not $ssh) { Write-Host '   ssh.exe не найден.' -ForegroundColor Red; return }
 $kg = Join-Path (Split-Path $ssh) 'ssh-keygen.exe'
 Write-Host "   $ssh"
@@ -268,18 +311,23 @@ if (-not ((Test-Path $g) -and ((Get-Content $g -Raw) -match '{{HOST_ALIAS}} ssh-
 $pub = (((Get-Content "$key.pub" -Raw).Trim()) -split ' ')[0..1] -join ' '
 
 Write-Host '5/7 Регистрация на сервере {{SRV_NAME}} и личный порт...' -ForegroundColor Cyan
-$base = "-p $SrvPort -o StrictHostKeyChecking=yes -o HostKeyAlias={{HOST_ALIAS}} -o HostKeyAlgorithms=ssh-ed25519,ecdsa-sha2-nistp256 -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 -o CheckHostIP=no"  # CheckHostIP=no: ssh 7.7 сам пишет [IP]:порт ecdsa и потом падает «Host key verification failed» (180, 12521)
+$base = "-p $SrvPort -o StrictHostKeyChecking=yes -o HostKeyAlias={{HOST_ALIAS}} -o HostKeyAlgorithms=ssh-ed25519,ecdsa-sha2-nistp256 -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 -o ConnectionAttempts=3 -o CheckHostIP=no"  # CheckHostIP=no: ssh 7.7 сам пишет [IP]:порт ecdsa и потом падает «Host key verification failed» (180, 12521)
 # три способа указать файлы — ssh 7.7 и новые читают по-разному; рабочий запоминаем для задачи
 $ways = @(
     @{ kh = "-o UserKnownHostsFile=$D/known_hosts"; e = "$D/enroll_key"; t = "$D/tunnel_key" },
     @{ kh = ''; e = "$D/enroll_key"; t = "$D/tunnel_key" },
     @{ kh = "-o UserKnownHostsFile=`"$Dir\known_hosts`""; e = "`"$ek`""; t = "`"$key`"" })
 $ok = $null; $Port = $null; $ErrorActionPreference = 'Continue'
-# сервер иногда рвёт соединение посреди обмена ключами («Connection reset», 180, 12521) — 4 круга с паузой
-for ($try = 1; $try -le 4 -and -not $Port; $try++) {
-    if ($try -gt 1) { Write-Host "   круг $try из 4 через 15 секунд..." -ForegroundColor DarkYellow; Start-Sleep 15 }
+# сервер иногда рвёт соединение посреди обмена ключами («Connection reset», 180, 12521) — 6 кругов с паузой
+# 12539: сброс — это очередь sshd на 16, а не неверный способ: тот же способ повторяем до 3 раз через 3/6 с, потом следующий
+for ($try = 1; $try -le 6 -and -not $Port; $try++) {
+    if ($try -gt 1) { Write-Host "   круг $try из 6 через 10 секунд..." -ForegroundColor DarkYellow; Start-Sleep 10 }
     foreach ($w in $ways) {
-        $out = cmd /c "`"$ssh`" -T $base $($w.kh) -i $($w.e) {{ENROLL_USER}}@$Srv `"$ph $pub $extra`" 2>&1"
+        for ($r = 1; $r -le 3; $r++) {
+            $out = cmd /c "`"$ssh`" -T $base $($w.kh) -i $($w.e) {{ENROLL_USER}}@$Srv `"$ph $pub $extra`" 2>&1"
+            if (-not (($out -join ' ') -match 'reset|Connection closed|timed out|kex_exchange') -or $r -eq 3) { break }
+            Write-Host "   сервер сбросил соединение — повтор $($r + 1) из 3 через $(3 * $r) с" -ForegroundColor DarkYellow; Start-Sleep (3 * $r)
+        }
         $m = $out | Select-String 'PORT=(\d+)' | Select-Object -First 1
         if ($m) { $ok = $w; $Port = $m.Matches[0].Groups[1].Value; break }
         Write-Host "   способ «$($w.kh)» — нет: $(($out | Select-Object -Last 2) -join ' | ')" -ForegroundColor DarkYellow

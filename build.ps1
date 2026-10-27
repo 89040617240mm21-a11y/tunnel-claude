@@ -40,6 +40,7 @@ $map = @{
     HOSTKEYS = $hostkeys; ALLOW_IPS = ($allow -join ', '); FROM_MAP = ($from -join '; ')
     RD_URL = Q (M 'rustdesk_url'); RD_SHA = M 'rustdesk_sha256'; RD_HOST = Q (M 'rustdesk_host'); RD_RELAY = Q (M 'rustdesk_relay')
     RD_KEY = Q (M 'rustdesk_key'); RD_CFG = Q (M 'rustdesk_config')   # RustDesk первым шагом (12503); пусто — шаг пропускается
+    RV_URL = Q (M 'radmin_url'); RV_SHA = M 'radmin_sha256'   # Radmin VPN тихо (12540); пусто — не ставим
 }
 
 New-Item -ItemType Directory -Force obj | Out-Null
