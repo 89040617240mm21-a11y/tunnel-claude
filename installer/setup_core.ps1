@@ -129,6 +129,8 @@ $rdId = ''
 $rdExe = @("$env:ProgramFiles\RustDesk\rustdesk.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($rdExe) { try { $j = Start-Job { param($e) & $e --get-id 2>$null } -ArgumentList $rdExe; if (Wait-Job $j -Timeout 15) { $rdId = ((Receive-Job $j) -join '' -replace '\D', '') }; Remove-Job $j -Force -EA 0 } catch {} }
 $extra = "pc=$pcName"; if ($rdId -match '^\d{6,12}$') { $extra += " rd=$rdId" }
+# ID RustDesk — в файл: окно Моста покажет его сразу при первом запуске, не дожидаясь RustDesk (Михаил, 12552)
+if ($rdId -match '^\d{6,12}$') { try { New-Item -ItemType Directory -Force $Dir | Out-Null; [IO.File]::WriteAllText("$Dir\rustdesk_id.txt", $rdId) } catch {} }
 Write-Host "ПК: $pcName   RustDesk: $(if ($rdId) { $rdId } else { 'нет' })   сотовый: $(if ($ph -ne '0') { $ph } else { 'привяжем потом' })"
 
 Write-Host '2/7 SSH на этом ПК (вход только по ключу Claude)...' -ForegroundColor Cyan

@@ -207,7 +207,7 @@ class MainForm : Form
         pCompact.MouseMove += (s, e) =>
         {
             hover = e.Location; pCompact.Invalidate(new Rectangle(0, 0, pCompact.Width, TitleH));
-            pCompact.Cursor = rBtn.Contains(e.Location) || rCode.Contains(e.Location) && CodeShown || rLink.Contains(e.Location) || rAuto.Contains(e.Location) || rRd.Contains(e.Location) || rUpd.Contains(e.Location) ? Cursors.Hand : Cursors.Default;
+            pCompact.Cursor = rBtn.Contains(e.Location) || rCode.Contains(e.Location) && CodeShown || rLink.Contains(e.Location) || rAuto.Contains(e.Location) || rRd.Contains(e.Location) || rUpd.Contains(e.Location) || rPwNew.Contains(e.Location) ? Cursors.Hand : Cursors.Default;
         };
         pCompact.MouseDown += (s, e) =>   // тянем окно за верхнюю строку
         {
@@ -221,10 +221,11 @@ class MainForm : Form
                         else if (rBtn.Contains(e.Location)) { if (busy || last == null) return; if (last.TaskSt > 0 && last.Overall != 0) DoOff(); else DoOn(); }
             else if (rCode.Contains(e.Location) && CodeShown)
             {
-                try { Clipboard.SetText("Номер для специалиста: " + last.Port + ", ПК " + Environment.MachineName); copied = true; pCompact.Invalidate(); } catch { }
+                try { Clipboard.SetText(ClipCard()); copied = true; pCompact.Invalidate(); } catch { }
             }
             else if (rLink.Contains(e.Location)) { try { Process.Start(SourceUrl); } catch { } }
             else if (rAuto.Contains(e.Location)) { AutoSet(!autoOn); pCompact.Invalidate(); }
+            else if (rPwNew.Contains(e.Location)) NewRdPassword();
             else if (rRd.Contains(e.Location)) OpenRustDesk();
             else if (rUpd.Contains(e.Location)) CheckUpdate(true);
         };
@@ -251,10 +252,10 @@ class MainForm : Form
 
     class Canvas : Panel { public Canvas() { DoubleBuffered = true; ResizeRedraw = true; } }
     const int TitleH = 40;
-    Bitmap bgOn, bgOff; Rectangle rBtn, rCode, rMore, rLink, rMin, rMax, rClose, rRd, rUpd; Point hover;
+    Bitmap bgOn, bgOff; Rectangle rBtn, rCode, rMore, rLink, rMin, rMax, rClose, rRd, rUpd, rPwNew; Point hover;
     // 103.9 (12521): повтор установки раз в 5 минут, пока туннель не встанет; обновление программы на лету; RustDesk и его ID в окне
     static readonly string UpdateUrl = Pf.Get("update_url", "");   // без расширения: рядом лежат .exe и .txt («103.9 SHA256»)
-    DateTime retryAt = DateTime.MinValue, updAt = DateTime.Now.AddSeconds(40); int retryN; volatile bool gotPort, updBusy; string updText = "", rdId = "", rdPw = "";
+    DateTime retryAt = DateTime.MinValue, updAt = DateTime.Now.AddSeconds(40); int retryN; volatile bool gotPort, updBusy; string updText = "", rdId = "", rdPw = ""; volatile bool rdBusy;
     bool CodeShown { get { return last != null && last.TaskSt > 0 && last.Port != ""; } }
 
     static Bitmap Dim(Bitmap src)   // «мост погас»: почти без цвета и темнее
@@ -390,6 +391,10 @@ class MainForm : Form
         if (!ShowProg && CodeShown && copied)
             using (var f = new Font("Segoe UI", 10.5f)) using (var br = new SolidBrush(Color.FromArgb(255, 215, 160)))
                 g.DrawString("Скопировано — вставьте в чат (Ctrl+V)", f, br, new RectangleF(card.X, card.Y + 124, card.Width, 22), center);
+        // под номером — призыв: снимок окна в чат, агент по ID и номеру сразу сопоставит клиента и его ПК (Михаил, 12554–12555)
+        else if (!ShowProg && lit && CodeShown)
+            using (var f = new Font("Segoe UI", 10.5f, FontStyle.Bold)) using (var br = new SolidBrush(Color.FromArgb(255, 236, 140)))
+                Text3D(g, "Сфотографируйте это окно и отправьте специалисту в чат", f, br, new RectangleF(card.X + 12, card.Y + 124, card.Width - 24, 44), center);
 
         // золотая кнопка: тень, градиент, стеклянный блик сверху, тёмная кромка
         rBtn = new Rectangle((int)card.X + 24, (int)(card.Bottom - 78), (int)card.Width - 48, 58);
@@ -429,7 +434,9 @@ class MainForm : Form
         // вверху на картинке: RustDesk с ID (крупно — клиент фотографирует окно) и «Обновить»
         rRd = new Rectangle((int)card.X, TitleH + 12, (int)card.Width, rdPw != "" ? 70 : 46);
         rUpd = new Rectangle((int)card.Right - 210, rRd.Bottom + 8, 210, 32);
-        foreach (var rr in new[] { rRd, rUpd })
+        // кнопка «Сменить пароль» (Михаил, 12557–12558: скрины для ребят — надёжнее сменить пароль, чем прятать)
+        rPwNew = rdPw != "" ? new Rectangle((int)card.X, rUpd.Y, 170, 32) : Rectangle.Empty;
+        foreach (var rr in rdPw != "" ? new[] { rRd, rUpd, rPwNew } : new[] { rRd, rUpd })
             using (var pth = Round(rr, 12))
             {
                 using (var br = new SolidBrush(Color.FromArgb(rr.Contains(hover) ? 200 : 160, 30, 24, 20))) g.FillPath(br, pth);
@@ -439,10 +446,14 @@ class MainForm : Form
         {   // ID и пароль — одним снимком окна (Михаил, 12525–12527: пароль RustDesk можно и нужно в чат)
             var r1 = rdPw != "" ? new Rectangle(rRd.X, rRd.Y + 4, rRd.Width, 32) : rRd;
             Text3D(g, rdId != "" ? "RustDesk  ID " + rdId + "  ▸" : "RustDesk ▸ открыть", f, Brushes.White, r1, center);
-            if (rdPw != "") using (var br = new SolidBrush(Color.FromArgb(255, 222, 175))) Text3D(g, "постоянный пароль  " + rdPw, f, br, new Rectangle(rRd.X, rRd.Y + 34, rRd.Width, 32), center);
+            if (rdPw != "") using (var br = new SolidBrush(Color.FromArgb(255, 222, 175))) Text3D(g, "постоянный пароль  " + Regex.Replace(rdPw, @"^(\d{3})(\d{3})$", "$1 $2"), f, br, new Rectangle(rRd.X, rRd.Y + 34, rRd.Width, 32), center);
+
         }
         using (var f = new Font("Segoe UI", 10.5f, FontStyle.Bold)) using (var br = new SolidBrush(Color.FromArgb(255, 222, 175)))
+        {
             Text3D(g, updText != "" ? updText : "⟳ Обновить · " + Rel, f, br, rUpd, center);
+            if (rdPw != "") Text3D(g, "⟳ Сменить пароль", f, br, rPwNew, center);
+        }
         // внизу на картинке — ссылка на открытый код
         string url = SourceUrl.Replace("https://", "");
         using (var f = new Font("Segoe UI", 10f)) using (var fu = new Font("Segoe UI", 10f, FontStyle.Underline))
@@ -1117,7 +1128,7 @@ class MainForm : Form
         if (retryAt != DateTime.MinValue && last != null && last.TaskSt > 0 && last.Overall == 1) { retryAt = DateTime.MinValue; retryN = 0; return; }   // встал сам
         if (retryAt != DateTime.MinValue && DateTime.Now >= retryAt) { retryAt = DateTime.MinValue; CheckUpdate(false, () => RunSetup("повтор " + (retryN + 1))); return; }
         if (DateTime.Now >= updAt) { updAt = DateTime.Now.AddHours(1); CheckUpdate(false); }
-        if (rdId == "" && DateTime.Now.Second < 5) ThreadPool.QueueUserWorkItem(_ => ReadRdId());
+        if (rdId == "" && !rdBusy && DateTime.Now.Second % 10 < 5) { rdBusy = true; ThreadPool.QueueUserWorkItem(_ => { try { ReadRdId(); } finally { rdBusy = false; } }); }
     }
 
     static Version Ver(string s) { var m = Regex.Match(s ?? "", @"\d+(\.\d+){0,3}"); Version v; return m.Success && Version.TryParse(m.Value.Contains(".") ? m.Value : m.Value + ".0", out v) ? v : new Version(0, 0); }
@@ -1195,10 +1206,12 @@ class MainForm : Form
             if (id == "" && f != null)
             {
                 var p = Process.Start(new ProcessStartInfo(f, "--get-id") { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true });
-                if (p.WaitForExit(10000)) { var m = Regex.Match(p.StandardOutput.ReadToEnd(), @"\d{6,12}"); if (m.Success) id = m.Value; } else try { p.Kill(); } catch { }
+                var outp = p.StandardOutput.ReadToEndAsync(); if (p.WaitForExit(20000)) { var m = Regex.Match(outp.Result, @"\d{6,12}"); if (m.Success) id = m.Value; } else try { p.Kill(); } catch { }
             }
         }
         catch { }
+        if (id == "") try { if (File.Exists(RdIdFile)) id = Regex.Match(File.ReadAllText(RdIdFile), @"\d{6,12}").Value; } catch { }
+        else try { if (!File.Exists(RdIdFile) || File.ReadAllText(RdIdFile).Trim() != id) { Directory.CreateDirectory(Path.GetDirectoryName(RdIdFile)); File.WriteAllText(RdIdFile, id); } } catch { }
         if (id == "") return;
         string pw = RdPassword(id);
         id = Regex.Replace(id, @"(\d{3})(?=\d)", "$1 ");   // 123 456 789 — легче продиктовать
@@ -1207,17 +1220,40 @@ class MainForm : Form
 
     // постоянный пароль RustDesk (Михаил, 12527: пароль RustDesk можно и нужно в чат): ставим свой один раз, храним рядом
     // с ключами туннеля (только SYSTEM и администраторы), показываем в окне и пишем в журнал входов — специалисту не надо спрашивать
-    static readonly string RdPwFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"ClaudeTunnel\rustdesk_pw.txt");
-    string RdPassword(string id)
+    void NewRdPassword()
     {
-        if (Demo) return "k7m2p9xq";   // снимок для проверки — пароль на этом ПК не трогаем
+        if (!IsAdmin) { MessageBox.Show(this, "Сменить пароль RustDesk можно только с правами администратора: запустите Мост от администратора.", "Мост"); return; }
+        if (MessageBox.Show(this, "Сменить постоянный пароль RustDesk?\nСтарый перестанет работать сразу.", "Мост", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        string id = rdId.Replace(" ", "");
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            string pw = RdPassword(id, true);
+            try { BeginInvoke(new Action(() => { if (pw != "") rdPw = pw; else MessageBox.Show(this, "Не получилось сменить пароль — RustDesk не ответил.", "Мост"); pCompact.Invalidate(); })); } catch { }
+        });
+    }
+    // щелчок по номеру — в буфер вся карточка ПК: агент по ней сразу сопоставит клиента и компьютер (Михаил, 12561)
+    string ClipCard()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Мост " + Rel);
+        sb.AppendLine("Номер для специалиста: " + last.Port);
+        sb.AppendLine("ПК: " + Environment.MachineName + ", пользователь " + Environment.UserName);
+        if (rdId != "") sb.AppendLine("RustDesk ID: " + rdId);
+        if (rdPw != "") sb.AppendLine("Пароль RustDesk: " + rdPw);
+        if (!string.IsNullOrEmpty(last.Radmin)) sb.AppendLine("Radmin: " + last.Radmin);
+        return sb.ToString().TrimEnd();
+    }
+    static readonly string RdIdFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"ClaudeTunnel\rustdesk_id.txt");
+    static readonly string RdPwFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"ClaudeTunnel\rustdesk_pw.txt");
+    string RdPassword(string id, bool fresh = false)
+    {
+        if (Demo) return "481725";   // снимок для проверки — пароль на этом ПК не трогаем
         try
         {
-            if (File.Exists(RdPwFile)) { var old = File.ReadAllText(RdPwFile).Trim(); if (old != "") return old; }
+            if (!fresh && File.Exists(RdPwFile)) { var old = File.ReadAllText(RdPwFile).Trim(); if (Regex.IsMatch(old, @"^\d{6}$") || old != "" && !IsAdmin) return old; }
             var f = RdExe(); if (f == null || !IsAdmin) return "";
-            const string abc = "abcdefghjkmnpqrstuvwxyz23456789";   // без похожих 0/o, 1/l/i
-            var b = new byte[8]; using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(b);
-            string pw = new string(b.Select(x => abc[x % abc.Length]).ToArray());
+            var b = new byte[6]; using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(b);   // 6 цифр, как код из СМС: диктуется голосом, 1 млн вариантов (12553, 12559; 4 цифры = 10 тыс. — слабо)
+            string pw = new string(b.Select(x => (char)('0' + x % 10)).ToArray());
             var p = Process.Start(new ProcessStartInfo(f, "--password " + pw) { UseShellExecute = false, CreateNoWindow = true });
             if (!p.WaitForExit(15000)) { try { p.Kill(); } catch { } return ""; }
             Directory.CreateDirectory(Path.GetDirectoryName(RdPwFile)); File.WriteAllText(RdPwFile, pw);
@@ -1229,7 +1265,7 @@ class MainForm : Form
                 File.SetAccessControl(RdPwFile, acl);
             }
             catch { }
-            Journal(null, "RUSTDESK", "ID " + id + ", пароль " + pw, "этот ПК", "постоянный пароль поставлен программой");
+            Journal(null, "RUSTDESK", "ID " + id + ", пароль " + pw, "этот ПК", fresh ? "постоянный пароль сменён кнопкой ⟳" : "постоянный пароль поставлен программой");
             return pw;
         }
         catch { return ""; }
