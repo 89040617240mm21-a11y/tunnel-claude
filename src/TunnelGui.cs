@@ -674,12 +674,46 @@ class MainForm : Form
                 {
                     string cl = "" + o["CommandLine"];
                     if (cl.IndexOf("ClaudeTunnel", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    lock (ownSsh) if (ownSsh.Contains(Convert.ToInt32(o["ProcessId"]))) continue;
                     if (cl.Contains(TunnelUser + "@")) { try { upSec = Math.Max(upSec, (DateTime.Now - ManagementDateTimeConverter.ToDateTime("" + o["CreationDate"])).TotalSeconds); } catch { } }
                     res.Add(Convert.ToInt32(o["ProcessId"]));
                 }
         }
         catch { }
+        detectHow = res.Count > 0 ? "WMI" : "";
+        // 104.9: на части ПК WMI не отдаёт командную строку процесса SYSTEM — туннель жив, а окно пишет «не поднят» (ПК PC, 22622).
+        //   Запасной путь: ssh.exe с открытым соединением на сервер (netstat), кроме наших коротких ssh для лога и проверки.
+        if (res.Count == 0)
+            foreach (int pid in NetPids())
+            {
+                res.Add(pid); detectHow = "соединение";
+                double u = 60; try { u = (DateTime.Now - Process.GetProcessById(pid).StartTime).TotalSeconds; } catch { }
+                upSec = Math.Max(upSec, u);
+            }
         return res;
+    }
+    static volatile string detectHow = "";
+    static readonly HashSet<int> ownSsh = new HashSet<int>();   // наши ssh для лога и проверки — это не туннель
+    static List<int> NetPids()
+    {
+        var r = new List<int>();
+        try
+        {
+            string ip = SrvIp; System.Net.IPAddress a0;
+            if (!System.Net.IPAddress.TryParse(ip, out a0)) try { ip = System.Net.Dns.GetHostAddresses(ip)[0].ToString(); } catch { }
+            var p = Process.Start(new ProcessStartInfo("netstat", "-ano -p TCP") { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true });
+            string o = p.StandardOutput.ReadToEnd(); p.WaitForExit(15000);
+            foreach (var ln in o.Split('\n'))
+            {
+                var a = ln.Split(new[] { ' ', '\t', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                if (a.Length < 5 || a[0] != "TCP" || a[2] != ip + ":" + SrvPort) continue;
+                int pid; if (!int.TryParse(a[a.Length - 1], out pid) || pid <= 4 || r.Contains(pid)) continue;
+                lock (ownSsh) if (ownSsh.Contains(pid)) continue;
+                try { if (Process.GetProcessById(pid).ProcessName.Equals("ssh", StringComparison.OrdinalIgnoreCase)) r.Add(pid); } catch { }
+            }
+        }
+        catch { }
+        return r;
     }
     static string Banner()
     {
@@ -745,13 +779,20 @@ class MainForm : Form
 
         R.TaskSt = TaskState();
         double up; var pids = TunnelPids(out up);
-        bool tunnelAlive = up >= 10;
+        bool tunnelAlive;
         long net = TcpMs(SrvIp, SrvPort, 3000);
         string banner = ServiceExists("sshd") ? Banner() : "(SSH на этом ПК не установлен)";
         bool sshOk = banner.StartsWith("SSH-2.0");
         string pt = ReadShared(Path.Combine(Dir, "port.txt"));
         if (!string.IsNullOrEmpty(pt)) { var p = pt.Trim().Split(' '); if (p.Length >= 2) R.Port = p[1]; }
         string lastLine; string reason = LogReason(out lastLine);
+        // 104.9: сквозная проверка через сервер — сервер сам стучится в 127.0.0.1:<номер> и ждёт ответ SSH этого ПК
+        bool wasGreen = last != null && last.Overall == 1;
+        if (!srvBusy && R.Port != "" && R.TaskSt > 0 && !busy && (DateTime.Now - srvChkAt).TotalSeconds >= (wasGreen ? 600 : 60))
+        { srvBusy = true; srvChkAt = DateTime.Now; string port = R.Port; ThreadPool.QueueUserWorkItem(_ => ServerCheck(port)); }
+        bool srvOk = (DateTime.Now - srvChkOkAt).TotalMinutes < (wasGreen ? 12 : 3);
+        bool upLocal = up >= 10;
+        tunnelAlive = upLocal || srvOk;
         foreach (var th in ths) th.Join(4000);
         for (int i = 0; i < servers.Length; i++) R.Pings.Add(pings[i] ?? new[] { "...", "..." });
 
@@ -764,7 +805,8 @@ class MainForm : Form
         rows.Add(new Row("SSH отвечает", sshOk ? "да (" + banner + ")" : "НЕТ " + banner, sshOk ? 1 : 0));
         string ts = R.TaskSt == -1 ? "не установлена — нажмите «ВКЛЮЧИТЬ»" : R.TaskSt == 0 ? "ВЫКЛЮЧЕНА (кнопка «ВЫКЛЮЧИТЬ»)" : R.TaskSt == 2 ? "включена, работает" : "включена, перезапускается каждую минуту";
         rows.Add(new Row("Задача «" + TaskName + "»", ts, R.TaskSt == -1 ? 0 : R.TaskSt == 0 ? 3 : 1));
-        rows.Add(new Row("Туннель до сервера " + SN, tunnelAlive ? "поднят, держится " + Dur(up) : pids.Count > 0 ? "подключается..." : "не поднят", tunnelAlive ? 1 : pids.Count > 0 ? 2 : 0));
+        rows.Add(new Row("Туннель до сервера " + SN, upLocal ? "поднят, держится " + Dur(up) + (detectHow == "соединение" ? " (найден по соединению)" : "") : srvOk ? "поднят (подтвердил сервер " + SN + ")" : pids.Count > 0 ? "подключается..." : "не поднят", tunnelAlive ? 1 : pids.Count > 0 ? 2 : 0));
+        if (srvChk != "") rows.Add(new Row("Проверка через сервер " + SN, srvChk, srvChk.StartsWith("CHECK=OK") ? 1 : srvChk.StartsWith("ERR") ? 3 : 0));
         bool radSvc = ServiceExists("RvControlSvc");
         rows.Add(new Row("Radmin VPN (запасной путь)", rip != "" ? "подключён, адрес " + rip : radSvc ? "установлен, но не в сети" : "не установлен (не обязательно)", rip != "" ? 1 : radSvc ? 2 : 3));
         rows.Add(new Row("Лог для специалистов", sendInfo, sendSt));
@@ -828,6 +870,88 @@ class MainForm : Form
         if (!busy && prevOverall > 0 && r.Overall == 0 && (DateTime.Now - lastAuto).TotalMinutes >= 10) { pending = "статус стал красным"; lastAuto = DateTime.Now; }
         prevOverall = r.Overall;
         if (pending != null && !busy) { string w = pending; pending = null; SendLog(w); }
+        // 104.9: пока не зелёное — короткий лог на сервер каждые 15 с (первые 30 минут), дальше раз в 5 минут
+        if (r.Overall == 1) notGreenSince = DateTime.MinValue; else if (notGreenSince == DateTime.MinValue) notGreenSince = DateTime.Now;
+        if (r.Overall != 1 && r.TaskSt != 0 && chkSend.Checked && !liveBusy && !Demo)
+        {
+            double gap = (DateTime.Now - notGreenSince).TotalMinutes < 30 ? 15 : 300;
+            if ((DateTime.Now - liveAt).TotalSeconds >= gap)
+            {
+                liveAt = DateTime.Now; liveBusy = true;
+                string body = BuildLive(); string ph = Regex.Replace(txtPhone.Text, @"\D", ""); if (!Regex.IsMatch(ph, @"^7\d{10}$")) ph = "0";
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    try { string so, err; if (SshCmd("live " + ph + " " + PcName(), body, "LIVE=OK", out so, out err)) liveInfo = "живой лог ушёл " + DateTime.Now.ToString("HH:mm:ss"); else liveInfo = "живой лог не ушёл: " + err; }
+                    finally { liveBusy = false; }
+                });
+            }
+        }
+    }
+    DateTime notGreenSince = DateTime.MinValue, liveAt = DateTime.MinValue; volatile bool liveBusy; volatile string liveInfo = "";
+
+    // ---------- 104.9: сквозная проверка через сервер и самопочинка ----------
+    volatile string srvChk = ""; volatile bool srvBusy; DateTime srvChkAt = DateTime.MinValue, srvChkOkAt = DateTime.MinValue, healAt = DateTime.MinValue; int srvBad;
+    void ServerCheck(string port)
+    {
+        try
+        {
+            string so, err, res;
+            if (SshCmd("check " + port, "", "CHECK=", out so, out err))
+                res = so.Contains("CHECK=OK") ? "CHECK=OK" : so.Contains("CHECK=WAIT") ? "WAIT" : so.Contains("CHECK=NOBANNER") ? "CHECK=NOBANNER" : "CHECK=NOLISTEN";
+            else res = "ERR " + err;
+            if (res == "WAIT") return;
+            srvChk = (res == "CHECK=OK" ? "CHECK=OK — сервер достучался до SSH этого ПК" : res == "CHECK=NOBANNER" ? "CHECK=NOBANNER — номер на сервере есть, SSH ПК не ответил" : res == "CHECK=NOLISTEN" ? "CHECK=NOLISTEN — на сервере нет номера " + port : res) + " · " + DateTime.Now.ToString("HH:mm:ss");
+            if (res == "CHECK=OK") { srvChkOkAt = DateTime.Now; srvBad = 0; }
+            else if (res.StartsWith("CHECK=")) { srvBad++; if (srvBad >= 2 && (DateTime.Now - healAt).TotalMinutes >= 5) { srvBad = 0; healAt = DateTime.Now; Heal(res); } }
+        }
+        catch { }
+        finally { srvBusy = false; }
+    }
+    void Heal(string why)   // в фоне; окно уже от администратора
+    {
+        if (busy) return;
+        Log(DateTime.Now.ToString("HH:mm:ss") + " Самопроверка: " + why + " два раза подряд — чиню сам: SSH этого ПК, разрешение 127.0.0.1/::1, перезапуск туннеля.");
+        Journal(null, "САМОПОЧИНКА", "программа", "этот ПК", why + ": перезапуск туннеля");
+        try
+        {
+            if (!Banner().StartsWith("SSH-2.0") && ServiceExists("sshd"))
+                using (var sc = new ServiceController("sshd"))
+                {
+                    if (sc.Status != ServiceControllerStatus.Stopped) { sc.Stop(); sc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(30)); }
+                    sc.Start(); sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(30));
+                    Log("   служба SSH перезапущена");
+                }
+        }
+        catch (Exception ex) { Log("   служба SSH: " + ex.Message); }
+        try { Run("netsh", "advfirewall firewall delete rule name=\"Claude туннель loopback\""); Run("netsh", "advfirewall firewall add rule name=\"Claude туннель loopback\" dir=in action=allow protocol=TCP localport=22 remoteip=127.0.0.1,::1"); } catch { }
+        try
+        {
+            dynamic s = Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service")); s.Connect();
+            dynamic t = s.GetFolder("\\").GetTask(TaskName);
+            try { t.Stop(0); } catch { }
+            double u; foreach (int pid in TunnelPids(out u)) Run("taskkill", "/F /PID " + pid);
+            Thread.Sleep(3000);
+            if ((bool)t.Enabled) t.Run(null);
+            Log("   туннель перезапущен — сервер проверит снова через минуту");
+        }
+        catch (Exception ex) { Log("   перезапуск туннеля: " + ex.Message); }
+        pending = "самопочинка: " + why;
+    }
+    static void Run(string exe, string args)
+    {
+        try { using (var p = Process.Start(new ProcessStartInfo(exe, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true })) { p.StandardOutput.ReadToEndAsync(); p.StandardError.ReadToEndAsync(); p.WaitForExit(20000); } } catch { }
+    }
+    string BuildLive()
+    {
+        var sb = new StringBuilder();
+        sb.Append("STATUS: ").Append(last != null ? last.Head.Replace("\n", " / ") : "нет данных").Append("\n");
+        sb.Append("Программа «" + AppName + "» ").Append(Rel).Append(" · живой лог (пока туннель не зелёный) · ПК: ").Append(Environment.MachineName).Append(" · ").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss zzz")).Append("\n");
+        sb.Append("Определение туннеля: ").Append(detectHow == "" ? "не найден" : detectHow).Append(" · проверка через сервер: ").Append(srvChk == "" ? "ещё не было" : srvChk).Append(" · ").Append(liveInfo).Append("\n\n");
+        sb.Append(Report(60)).Append("\n");
+        string sl = ReadShared(Path.Combine(Dir, "ssh.log"));
+        if (!string.IsNullOrEmpty(sl)) { var a = sl.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries); sb.Append("--- ssh.log туннеля (последние 30 строк):\n"); foreach (var x in a.Skip(Math.Max(0, a.Length - 30))) sb.Append(x).Append("\n"); }
+        string t = sb.ToString(); if (t.Length > 60000) t = t.Substring(0, 60000);
+        return t;
     }
 
     // ---------- лог для специалистов на сервер (версия 102) ----------
@@ -906,36 +1030,41 @@ class MainForm : Form
         File.WriteAllText(kh, HostKeys, new UTF8Encoding(false));
     }
 
-    static bool SshLog(string ph, string body, out string err)
+    static string PcName() { string pc = Regex.Replace(Environment.MachineName, @"[^A-Za-z0-9._-]", "_"); return pc.Length > 40 ? pc.Substring(0, 40) : pc; }
+    static bool SshLog(string ph, string body, out string err) { string so; return SshCmd("log " + ph + " " + PcName(), body, "LOG=OK", out so, out err); }
+    static bool SshCmd(string cmd, string body, string okMark, out string sout, out string err)
     {
-        err = "";
+        err = ""; sout = "";
         string ssh = SshPath();
         if (ssh == null) { err = "на ПК нет программы ssh.exe (её ставит кнопка «ВКЛЮЧИТЬ»)"; return false; }
         string ek = Path.Combine(GuiDir, "enroll_key"), kh = Path.Combine(GuiDir, "known_hosts");
         try { PrepareKey(ek, kh); } catch (Exception ex) { err = "ключ: " + ex.Message; return false; }
-        string pc = Regex.Replace(Environment.MachineName, @"[^A-Za-z0-9._-]", "_"); if (pc.Length > 40) pc = pc.Substring(0, 40);
         byte[] data = Encoding.UTF8.GetBytes(body);
         // два способа указать файлы — ssh 7.7 и новые читают пути по-разному (как в скрипте туннеля)
         foreach (var w in new[] { new[] { ek.Replace('\\', '/'), kh.Replace('\\', '/') }, new[] { "\"" + ek + "\"", "\"" + kh + "\"" } })
         {
             string args = "-T -p " + SrvPort + " -o StrictHostKeyChecking=yes -o HostKeyAlias=" + HostAlias + " -o HostKeyAlgorithms=ssh-ed25519,ecdsa-sha2-nistp256" +
                           " -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15 -o UserKnownHostsFile=" + w[1] + " -i " + w[0] +
-                          " " + EnrollUser + "@" + SrvIp + " \"log " + ph + " " + pc + "\"";
+                          " " + EnrollUser + "@" + SrvIp + " \"" + cmd + "\"";
             try
             {
                 var psi = new ProcessStartInfo(ssh, args) { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
                 using (var p = Process.Start(psi))
                 {
+                    int myPid = p.Id; lock (ownSsh) ownSsh.Add(myPid);
+                    try {
                     string so = "", se = "";
                     var tO = new Thread(() => { try { so = p.StandardOutput.ReadToEnd(); } catch { } }); tO.IsBackground = true; tO.Start();
                     var tE = new Thread(() => { try { se = p.StandardError.ReadToEnd(); } catch { } }); tE.IsBackground = true; tE.Start();
                     try { p.StandardInput.BaseStream.Write(data, 0, data.Length); p.StandardInput.Close(); } catch { }
                     if (!p.WaitForExit(40000)) { try { p.Kill(); } catch { } err = "сервер " + SN + " не ответил за 40 с"; continue; }
                     tO.Join(3000); tE.Join(3000);
-                    if (so.Contains("LOG=OK")) return true;
+                    sout = so;
+                    if (so.Contains(okMark)) return true;
                     var ln = (so + "\n" + se).Split('\n').Select(x => x.Trim()).Where(x => x != "" && !x.StartsWith("**")).ToArray();
                     err = ln.Length > 0 ? ln[ln.Length - 1] : "нет ответа (код " + p.ExitCode + ")";
                     if (err.Length > 150) err = err.Substring(0, 150);
+                    } finally { lock (ownSsh) ownSsh.Remove(myPid); }
                 }
             }
             catch (Exception ex) { err = ex.Message; }
@@ -1127,13 +1256,16 @@ class MainForm : Form
         if (busy || updBusy) return;
         if (retryAt != DateTime.MinValue && last != null && last.TaskSt > 0 && last.Overall == 1) { retryAt = DateTime.MinValue; retryN = 0; return; }   // встал сам
         if (retryAt != DateTime.MinValue && DateTime.Now >= retryAt) { retryAt = DateTime.MinValue; CheckUpdate(false, () => RunSetup("повтор " + (retryN + 1))); return; }
-        if (DateTime.Now >= updAt) { updAt = DateTime.Now.AddHours(1); CheckUpdate(false); }
+        var uiv = last != null && last.Overall == 1 ? TimeSpan.FromHours(1) : TimeSpan.FromSeconds(15);   // 104.9: не поднят — каждые 15 с
+        if (updAt > DateTime.Now + uiv) updAt = DateTime.Now + uiv;
+        if (DateTime.Now >= updAt) { updAt = DateTime.Now + uiv; CheckUpdate(false); }
         if (rdId == "" && !rdBusy && DateTime.Now.Second % 10 < 5) { rdBusy = true; ThreadPool.QueueUserWorkItem(_ => { try { ReadRdId(); } finally { rdBusy = false; } }); }
     }
 
     static Version Ver(string s) { var m = Regex.Match(s ?? "", @"\d+(\.\d+){0,3}"); Version v; return m.Success && Version.TryParse(m.Value.Contains(".") ? m.Value : m.Value + ".0", out v) ? v : new Version(0, 0); }
 
     // кнопка «Обновить» и проверка раз в час: на сервере файл .txt («103.9 SHA256»), качаем .exe, сверяем SHA256, подменяем себя и перезапускаемся
+    static string lastUpdErr = "";
     void CheckUpdate(bool manual, Action after = null)
     {
         if (updBusy || UpdateUrl == "") { if (manual && UpdateUrl == "") { updText = "обновления выключены"; pCompact.Invalidate(); } if (after != null) after(); return; }
@@ -1170,7 +1302,7 @@ class MainForm : Form
                     }
                 }
             }
-            catch (Exception ex) { msg = "нет связи с сервером обновлений"; try { BeginInvoke(new Action(() => Log("Обновление: " + ex.Message))); } catch { } }
+            catch (Exception ex) { msg = "нет связи с сервером обновлений"; if (manual || ex.Message != lastUpdErr) { lastUpdErr = ex.Message; try { BeginInvoke(new Action(() => Log("Обновление: " + ex.Message))); } catch { } } }
             try
             {
                 BeginInvoke(new Action(() =>

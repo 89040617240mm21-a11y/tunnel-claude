@@ -25,6 +25,22 @@
 # Опыт одного ПК (Win10 1909, ssh 7.7): пути с прямыми слешами, имя сервера {{HOST_ALIAS}}, владелец ключа — Администраторы.
 $ErrorActionPreference = 'Stop'
 $Srv = '{{SERVER}}'; $SrvPort = {{PORT}}
+# 104.9: туннель ищем двумя путями — по командной строке (WMI) и по соединению ssh.exe с сервером (на части ПК WMI не отдаёт
+#   командную строку процесса SYSTEM, и старый туннель не находился и не убивался — ПК PC, 22622). Убиваем через Планировщик + taskkill /F.
+function Get-TunnelPids {
+    $r = @()
+    try { $r += @(Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -EA Stop | Where-Object { $_.CommandLine -like '*ClaudeTunnel*' } | ForEach-Object { [int]$_.ProcessId }) } catch {}
+    try { $r += @(Get-NetTCPConnection -RemoteAddress $Srv -RemotePort $SrvPort -EA Stop | Where-Object { (Get-Process -Id $_.OwningProcess -EA 0).Name -eq 'ssh' } | ForEach-Object { [int]$_.OwningProcess }) } catch {}
+    @($r | Select-Object -Unique)
+}
+function Stop-Tunnel {
+    Stop-ScheduledTask -TaskName '{{TASK_NAME}}' -EA 0
+    foreach ($i in Get-TunnelPids) { cmd /c "taskkill /F /PID $i >nul 2>&1" }
+}
+function Read-Shared($f, $n) {   # ssh.log держит открытым живой ssh — читаем с общим доступом
+    try { $fs = [IO.File]::Open($f, 'Open', 'Read', 'ReadWrite, Delete'); $sr = New-Object IO.StreamReader($fs); $t = $sr.ReadToEnd(); $sr.Close(); @($t -split "`r?`n" | Where-Object { $_ } | Select-Object -Last $n) }
+    catch { @("(не прочитан: $($_.Exception.Message))") }
+}
 $Url = '{{FILES_URL}}'
 $Dir = "$env:ProgramData\ClaudeTunnel"; $D = $Dir.Replace([char]92, [char]47)
 $pr = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -279,7 +295,7 @@ Write-Host "   $ssh"
 
 Write-Host '4/7 Личный ключ этого ПК...' -ForegroundColor Cyan
 New-Item -ItemType Directory -Force $Dir | Out-Null
-Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" | Where-Object { $_.CommandLine -like '*ClaudeTunnel*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA 0 }
+Stop-Tunnel; Start-Sleep 2
 $key = "$Dir\tunnel_key"; $ek = "$Dir\enroll_key"
 # ключ прошлого запуска общего скрипта оставляем (тот же порт); ключ от старого личного скрипта (без port.txt) — заменяем
 $old = (Test-Path $key) -and (Test-Path "$Dir\port.txt") -and (Test-Path "$key.pub")
@@ -346,6 +362,7 @@ $targ = "-N -T $base $($ok.kh) -i $($ok.t) -o ExitOnForwardFailure=yes -o Server
 $act = New-ScheduledTaskAction -Execute $ssh -Argument $targ
 $trg = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1)))
 $set = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+Stop-Tunnel
 Unregister-ScheduledTask -TaskName '{{TASK_NAME}}' -Confirm:$false -EA 0
 Register-ScheduledTask -TaskName '{{TASK_NAME}}' -Action $act -Trigger $trg -Settings $set -User 'SYSTEM' -RunLevel Highest -Description "Туннель на сервер {{SRV_NAME}} для специалиста: номер клиента $Port, ПК $pcName, сотовый $ph (общий РЕЛИЗ 9). Отключить — правой кнопкой -> Отключить." | Out-Null
 Remove-Item "$Dir\ssh.log" -EA 0
@@ -357,8 +374,8 @@ Get-ChildItem $desk -Filter 'Туннель Claude*.ps1' -EA 0 | Remove-Item -EA
 $up = $false
 for ($i = 1; $i -le 24 -and -not $up; $i++) {
     Start-Sleep 5
-    $p = Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" | Where-Object { $_.CommandLine -like '*{{TUNNEL_USER}}@*' }
-    if ($p) { Start-Sleep 8; $up = [bool](Get-Process -Id $p.ProcessId -EA 0) }
+    $p = Get-TunnelPids | Select-Object -First 1
+    if ($p) { Start-Sleep 8; $up = [bool](Get-Process -Id $p -EA 0) }
     if (-not $up -and $i % 4 -eq 0) { Start-ScheduledTask -TaskName '{{TASK_NAME}}' -EA 0; Write-Host "   жду... ($($i * 5) с)" }
 }
 # РЕЛИЗ 7 (правило 9784): на каждом новом ПК сразу проверка на вирусы Защитником БЕЗ удаления (активаторы не трогаем, 6549);
@@ -393,7 +410,7 @@ try { [IO.File]::WriteAllText((Join-Path $desk "Номер для специал
 if ($up) { Write-Host "`nГотово: туннель работает. НОМЕР КЛИЕНТА: $Port (ПК $pcName). Можно отключаться." -ForegroundColor Green }
 else {
     Write-Host "`nТуннель пока не поднялся. Номер клиента $Port, ПК $pcName." -ForegroundColor Red
-    if (Test-Path "$Dir\ssh.log") { Get-Content "$Dir\ssh.log" -Tail 6 | ForEach-Object { Write-Host "   $_" } }
+    if (Test-Path "$Dir\ssh.log") { Read-Shared "$Dir\ssh.log" 6 | ForEach-Object { Write-Host "   $_" } }
     Write-Host 'Пришлите текст этого окна.' -ForegroundColor Red
 }
 }
