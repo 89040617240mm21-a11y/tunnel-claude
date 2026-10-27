@@ -70,7 +70,7 @@ class MainForm : Form
     static readonly string SN = Pf.Get("srv_name", "поддержки"), HostAlias = Pf.Get("host_alias", "claude16");
     static readonly string TunnelUser = Pf.Get("tunnel_user", "claude_tunnel"), EnrollUser = Pf.Get("enroll_user", "claude_enroll");
     static readonly string Org = Pf.Get("org", "специалисты поддержки"), JournalName = Pf.Get("journal", "Журнал доступа Claude.txt");
-    static readonly string SourceUrl = Pf.Get("source_url", "https://github.com/89040617240mm21-a11y/tunnel-claude");   // открытый код: клиент сам видит, что делает программа
+    static readonly string SourceUrl = Pf.Get("source_url", "https://github.com/oblako-tech/tunnel-claude");   // открытый код: клиент сам видит, что делает программа
     static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ClaudeTunnel");
     static readonly string JournalPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), JournalName);
     static readonly object jlock = new object();
