@@ -1423,7 +1423,8 @@ class MainForm : Form
         sb.AppendLine("Состояние: " + st);
         if (busy && stepLine != "") sb.AppendLine("Последняя строка установки: " + stepLine);
         sb.AppendLine("ПК: " + Environment.MachineName + ", пользователь " + Environment.UserName);
-        if (rdId != "") sb.AppendLine("RustDesk ID: " + rdId);
+        // ID без пробелов — копируется одним куском прямо в поле RustDesk (Михаил, 13012)
+        if (rdId != "") sb.AppendLine("RustDesk ID: " + rdId.Replace(" ", ""));
         if (rdPw != "") sb.AppendLine("Пароль RustDesk: " + rdPw);
         if (last != null && !string.IsNullOrEmpty(last.Radmin)) sb.AppendLine("Radmin: " + last.Radmin);
         if (SrvAlt != "" && goodHost == SrvAlt) sb.AppendLine("Связь с сервером: запасной путь через Radmin " + SrvAlt);
