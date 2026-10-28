@@ -1,7 +1,7 @@
 ﻿// Мост (Туннель Claude) — окно для клиента: проверка ПК встроенным Защитником Windows (без удаления, с отчётом) и обратный SSH-туннель
 // для удалённого обслуживания 1С. Кнопки ВКЛЮЧИТЬ / ВЫКЛЮЧИТЬ / ПОЧИНИТЬ, крупный статус «туннель поднят или нет и почему»,
 // пинг до серверов специалистов (с флагами), Radmin VPN как запасной путь, снимок окна, журнал «кто заходил и что делал»
-// на рабочем столе (понятен любому ИИ), лог запуска и ошибок специалистам (галочка). Установку делает встроенный скрипт туннеля.
+// в папке C:\Мост (понятен любому ИИ), лог запуска и ошибок специалистам (галочка). Установку делает встроенный скрипт туннеля.
 // Всё «своё» (сервер, порт, ключи специалистов, отпечаток сервера, серверы с флагами) — в profile.ini, он вшивается при сборке (build.ps1).
 using Microsoft.Win32;
 using System;
@@ -67,12 +67,18 @@ class MainForm : Form
     static readonly string AppName = Pf.Get("app_name", "Мост");   // имя в окне и журнале (Михаил, 12483, 12501)
     static readonly string AppSub = Pf.Get("app_sub", "");   // мелкая подпись после имени: «Мост · для ИИ Агента» (Михаил, 12528)
     static readonly string SrvIp = Pf.Get("host", ""); static readonly int SrvPort = int.Parse(Pf.Get("port", "22")); static readonly string TaskName = Pf.Get("task_name", "Claude туннель");
+    static readonly string SrvAlt = Pf.Get("host_alt", "");   // 104.10: запасной адрес того же сервера (Radmin VPN) — прямой путь из-за границы рвётся (126, 12875)
+    static volatile string goodHost = "";                        // адрес, который последним ответил, — с него и начинаем
+    static readonly object keyLock = new object();               // known_hosts и ключ пишут параллельные ssh (живой лог, проверка, журнал)
     static readonly string SN = Pf.Get("srv_name", "поддержки"), HostAlias = Pf.Get("host_alias", "claude16");
     static readonly string TunnelUser = Pf.Get("tunnel_user", "claude_tunnel"), EnrollUser = Pf.Get("enroll_user", "claude_enroll");
     static readonly string Org = Pf.Get("org", "специалисты поддержки"), JournalName = Pf.Get("journal", "Журнал доступа Claude.txt");
     static readonly string SourceUrl = Pf.Get("source_url", "https://github.com/oblako-tech/tunnel-claude");   // открытый код: клиент сам видит, что делает программа
     static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ClaudeTunnel");
-    static readonly string JournalPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), JournalName);
+    // 104.10 (Михаил, 12980–12982): все журналы и снимки — в одной папке C:\Мост, а не на рабочие столы всех пользователей
+    static readonly string LogDir = Pf.Get("log_dir", @"C:\Мост");
+    static readonly string JournalPath = Path.Combine(LogDir, JournalName);
+    static readonly string OldJournal = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), JournalName);
     static readonly object jlock = new object();
 
     // известные ключи специалистов: отпечаток -> кто
@@ -226,7 +232,11 @@ class MainForm : Form
             else if (rLink.Contains(e.Location)) { try { Process.Start(SourceUrl); } catch { } }
             else if (rAuto.Contains(e.Location)) { AutoSet(!autoOn); pCompact.Invalidate(); }
             else if (rPwNew.Contains(e.Location)) NewRdPassword();
-            else if (rRd.Contains(e.Location)) OpenRustDesk();
+            else if (rRd.Contains(e.Location))
+            {   // щелчок по RustDesk — в буфер всё, что уже собрано, даже без номера и посреди установки (Михаил, 12875)
+                try { Clipboard.SetText(ClipCard()); copied = true; pCompact.Invalidate(); } catch { }
+                OpenRustDesk();
+            }
             else if (rUpd.Contains(e.Location)) CheckUpdate(true);
         };
         Controls.Add(pCompact); pCompact.BringToFront();
@@ -388,7 +398,7 @@ class MainForm : Form
         rCode = new Rectangle((int)card.X, (int)card.Y + 72, (int)card.Width, 56);
         if (ShowProg) PaintProgress(g, card, center);
         else using (var f = new Font("Segoe UI", lit && CodeShown ? 25f : 14f, FontStyle.Bold)) Text3D(g, code, f, Brushes.White, rCode, center);
-        if (!ShowProg && CodeShown && copied)
+        if (!ShowProg && copied)
             using (var f = new Font("Segoe UI", 10.5f)) using (var br = new SolidBrush(Color.FromArgb(255, 215, 160)))
                 g.DrawString("Скопировано — вставьте в чат (Ctrl+V)", f, br, new RectangleF(card.X, card.Y + 124, card.Width, 22), center);
         // под номером — призыв: снимок окна в чат, агент по ID и номеру сразу сопоставит клиента и его ПК (Михаил, 12554–12555)
@@ -445,7 +455,7 @@ class MainForm : Form
         using (var f = new Font("Segoe UI", 15f, FontStyle.Bold))
         {   // ID и пароль — одним снимком окна (Михаил, 12525–12527: пароль RustDesk можно и нужно в чат)
             var r1 = rdPw != "" ? new Rectangle(rRd.X, rRd.Y + 4, rRd.Width, 32) : rRd;
-            Text3D(g, rdId != "" ? "RustDesk  ID " + rdId + "  ▸" : "RustDesk ▸ открыть", f, Brushes.White, r1, center);
+            Text3D(g, copied ? "✓ Скопировано — Ctrl+V в чат" : rdId != "" ? "RustDesk  ID " + rdId + "  ▸" : "RustDesk ▸ открыть", f, Brushes.White, r1, center);
             if (rdPw != "") using (var br = new SolidBrush(Color.FromArgb(255, 222, 175))) Text3D(g, "постоянный пароль  " + Regex.Replace(rdPw, @"^(\d{3})(\d{3})$", "$1 $2"), f, br, new Rectangle(rRd.X, rRd.Y + 34, rRd.Width, 32), center);
 
         }
@@ -546,11 +556,12 @@ class MainForm : Form
         return b;
     }
 
-    // ---------- журнал на рабочем столе ----------
+    // ---------- журнал в папке C:\Мост ----------
     static readonly string Header =
         "ЖУРНАЛ ДОСТУПА СПЕЦИАЛИСТОВ К ЭТОМУ КОМПЬЮТЕРУ (программа «" + AppName + "»)\r\n" +
         "Что это: вы сами установили программу, чтобы " + Org + " могли помочь вам удалённо.\r\n" +
         "Сюда пишется само: когда доступ включали и выключали, кто заходил (по какому ключу), откуда и какие команды выполнял.\r\n" +
+        "Все журналы и снимки программы — в этой папке (" + LogDir + "), на рабочий стол программа ничего не кладёт.\r\n" +
         "Полные записи каждого входа (команды и ответы компьютера) — в папке C:\\ProgramData\\ClaudeTunnel\\sessions.\r\n" +
         "Этот файл можно отправить любому ИИ (ChatGPT, Claude, Алиса и др.) с вопросом «что делали на моём компьютере?».\r\n" +
         "Выключить доступ в любой момент — кнопка «ВЫКЛЮЧИТЬ» в программе «" + AppName + "».\r\n" +
@@ -559,7 +570,20 @@ class MainForm : Form
 
     static void EnsureJournal()
     {
-        lock (jlock) { try { if (!File.Exists(JournalPath)) File.WriteAllText(JournalPath, Header, new UTF8Encoding(true)); } catch { } }
+        lock (jlock)
+        {
+            try
+            {
+                Directory.CreateDirectory(LogDir);
+                if (!File.Exists(JournalPath)) File.WriteAllText(JournalPath, Header, new UTF8Encoding(true));
+                if (File.Exists(OldJournal))   // старый журнал с общего рабочего стола (до 104.10) — дописываем сюда и убираем со стола
+                {
+                    File.AppendAllText(JournalPath, "---------- перенесено с рабочего стола " + DateTime.Now.ToString("dd.MM.yyyy HH:mm") + " ----------\r\n" + File.ReadAllText(OldJournal) + "\r\n", new UTF8Encoding(true));
+                    File.Delete(OldJournal);
+                }
+            }
+            catch { }
+        }
     }
     static void Journal(DateTime? t, string ev, string who, string from, string det)
     {
@@ -584,7 +608,7 @@ class MainForm : Form
     }
     static string From(string ip) { string v; return ip != null && FromMap.TryGetValue(ip, out v) ? v : ip; }
 
-    // входы и выходы из журнала Windows OpenSSH -> в журнал на рабочем столе
+    // входы и выходы из журнала Windows OpenSSH -> в журнал в папке LogDir (C:\Мост)
     static void SyncEvents()
     {
         try
@@ -706,7 +730,7 @@ class MainForm : Form
             foreach (var ln in o.Split('\n'))
             {
                 var a = ln.Split(new[] { ' ', '\t', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-                if (a.Length < 5 || a[0] != "TCP" || a[2] != ip + ":" + SrvPort) continue;
+                if (a.Length < 5 || a[0] != "TCP" || (a[2] != ip + ":" + SrvPort && (SrvAlt == "" || a[2] != SrvAlt + ":" + SrvPort))) continue;
                 int pid; if (!int.TryParse(a[a.Length - 1], out pid) || pid <= 4 || r.Contains(pid)) continue;
                 lock (ownSsh) if (ownSsh.Contains(pid)) continue;
                 try { if (Process.GetProcessById(pid).ProcessName.Equals("ssh", StringComparison.OrdinalIgnoreCase)) r.Add(pid); } catch { }
@@ -780,7 +804,8 @@ class MainForm : Form
         R.TaskSt = TaskState();
         double up; var pids = TunnelPids(out up);
         bool tunnelAlive;
-        long net = TcpMs(SrvIp, SrvPort, 3000);
+        long net = TcpMs(SrvIp, SrvPort, 3000); bool viaAlt = false;
+        if (net <= 0 && SrvAlt != "") { net = TcpMs(SrvAlt, SrvPort, 3000); viaAlt = net > 0; }
         string banner = ServiceExists("sshd") ? Banner() : "(SSH на этом ПК не установлен)";
         bool sshOk = banner.StartsWith("SSH-2.0");
         string pt = ReadShared(Path.Combine(Dir, "port.txt"));
@@ -796,7 +821,7 @@ class MainForm : Form
         foreach (var th in ths) th.Join(4000);
         for (int i = 0; i < servers.Length; i++) R.Pings.Add(pings[i] ?? new[] { "...", "..." });
 
-        rows.Add(new Row("Связь с сервером " + SN, net > 0 ? "есть, " + net + " мс" : "НЕТ — интернет или блокировка порта " + SrvPort + " (провайдер, антивирус)", net > 0 ? 1 : 0));
+        rows.Add(new Row("Связь с сервером " + SN, net > 0 ? "есть, " + net + " мс" + (viaAlt ? " (запасной путь через Radmin " + SrvAlt + ")" : "") : "НЕТ — интернет или блокировка порта " + SrvPort + " (провайдер, антивирус)", net > 0 ? 1 : 0));
         string svc;
         int svcSt;
         if (!ServiceExists("sshd")) { svc = "не установлена — нажмите «ВКЛЮЧИТЬ»"; svcSt = 0; }
@@ -1016,6 +1041,7 @@ class MainForm : Form
     // ключ регистрации (общий, тот же, что во встроенном скрипте) и отпечаток сервера — в ProgramData\ClaudeTunnel\gui
     static void PrepareKey(string ek, string kh)
     {
+        lock (keyLock) {
         Directory.CreateDirectory(GuiDir);
         if (!File.Exists(ek))
         {
@@ -1027,7 +1053,10 @@ class MainForm : Form
         var adm = new SecurityIdentifier("S-1-5-32-544"); acl.SetOwner(adm);
         foreach (var sid in new[] { new SecurityIdentifier("S-1-5-18"), adm }) acl.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.FullControl, AccessControlType.Allow));
         File.SetAccessControl(ek, acl);
-        File.WriteAllText(kh, HostKeys, new UTF8Encoding(false));
+        // 104.10: переписываем только если отличается — раньше каждый ssh перезаписывал файл, пока соседний его читал
+        string old = null; try { if (File.Exists(kh)) old = File.ReadAllText(kh); } catch { }
+        if (old != HostKeys) File.WriteAllText(kh, HostKeys, new UTF8Encoding(false));
+        }
     }
 
     static string PcName() { string pc = Regex.Replace(Environment.MachineName, @"[^A-Za-z0-9._-]", "_"); return pc.Length > 40 ? pc.Substring(0, 40) : pc; }
@@ -1040,12 +1069,18 @@ class MainForm : Form
         string ek = Path.Combine(GuiDir, "enroll_key"), kh = Path.Combine(GuiDir, "known_hosts");
         try { PrepareKey(ek, kh); } catch (Exception ex) { err = "ключ: " + ex.Message; return false; }
         byte[] data = Encoding.UTF8.GetBytes(body);
+        // 104.10: сначала адрес, что ответил последним; запасной — только если отвечает за 3 с; завис адрес — сразу к следующему
+        var hosts = new List<string> { SrvIp };
+        if (SrvAlt != "" && SrvAlt != SrvIp) { if (goodHost == SrvAlt) hosts.Insert(0, SrvAlt); else hosts.Add(SrvAlt); }
+        foreach (var host in hosts)
+        {
+        if (host == SrvAlt && host != goodHost && TcpMs(host, SrvPort, 3000) <= 0) continue;
         // два способа указать файлы — ssh 7.7 и новые читают пути по-разному (как в скрипте туннеля)
         foreach (var w in new[] { new[] { ek.Replace('\\', '/'), kh.Replace('\\', '/') }, new[] { "\"" + ek + "\"", "\"" + kh + "\"" } })
         {
             string args = "-T -p " + SrvPort + " -o StrictHostKeyChecking=yes -o HostKeyAlias=" + HostAlias + " -o HostKeyAlgorithms=ssh-ed25519,ecdsa-sha2-nistp256" +
                           " -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15 -o UserKnownHostsFile=" + w[1] + " -i " + w[0] +
-                          " " + EnrollUser + "@" + SrvIp + " \"" + cmd + "\"";
+                          " " + EnrollUser + "@" + host + " \"" + cmd + "\"";
             try
             {
                 var psi = new ProcessStartInfo(ssh, args) { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
@@ -1053,14 +1088,26 @@ class MainForm : Form
                 {
                     int myPid = p.Id; lock (ownSsh) ownSsh.Add(myPid);
                     try {
-                    string so = "", se = "";
-                    var tO = new Thread(() => { try { so = p.StandardOutput.ReadToEnd(); } catch { } }); tO.IsBackground = true; tO.Start();
+                    string se = ""; var sbO = new StringBuilder();
+                    var tO = new Thread(() => { try { var b = new char[4096]; int n; while ((n = p.StandardOutput.Read(b, 0, b.Length)) > 0) lock (sbO) sbO.Append(b, 0, n); } catch { } }); tO.IsBackground = true; tO.Start();
                     var tE = new Thread(() => { try { se = p.StandardError.ReadToEnd(); } catch { } }); tE.IsBackground = true; tE.Start();
                     try { p.StandardInput.BaseStream.Write(data, 0, data.Length); p.StandardInput.Close(); } catch { }
-                    if (!p.WaitForExit(40000)) { try { p.Kill(); } catch { } err = "сервер " + SN + " не ответил за 40 с"; continue; }
+                    // 104.10 (126): ssh 8.1 получает ответ, но сам не закрывается — ждём строку ответа, а не выхода ssh
+                    var sw = Stopwatch.StartNew(); bool got = false;
+                    while (!p.WaitForExit(250))
+                    {
+                        lock (sbO) { string cur = sbO.ToString(); int i = cur.IndexOf(okMark); got = i >= 0 && cur.IndexOf('\n', i) > 0; }
+                        if (got || sw.ElapsedMilliseconds > 40000) break;
+                    }
+                    if (!p.HasExited)
+                    {
+                        try { p.Kill(); p.WaitForExit(2000); } catch { }
+                        if (!got) { err = "сервер " + SN + " (" + host + ") не ответил за 40 с"; break; }
+                    }
                     tO.Join(3000); tE.Join(3000);
+                    string so; lock (sbO) so = sbO.ToString();
                     sout = so;
-                    if (so.Contains(okMark)) return true;
+                    if (so.Contains(okMark)) { goodHost = host; return true; }
                     var ln = (so + "\n" + se).Split('\n').Select(x => x.Trim()).Where(x => x != "" && !x.StartsWith("**")).ToArray();
                     err = ln.Length > 0 ? ln[ln.Length - 1] : "нет ответа (код " + p.ExitCode + ")";
                     if (err.Length > 150) err = err.Substring(0, 150);
@@ -1068,6 +1115,7 @@ class MainForm : Form
                 }
             }
             catch (Exception ex) { err = ex.Message; }
+        }
         }
         return false;
     }
@@ -1128,11 +1176,12 @@ class MainForm : Form
         {
             var b = new Bitmap(Width, Height);
             using (var g = Graphics.FromImage(b)) g.CopyFromScreen(Location, Point.Empty, Size);
-            string f = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), AppName + " снимок " + DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss") + ".png");
+            Directory.CreateDirectory(LogDir);
+            string f = Path.Combine(LogDir, AppName + " снимок " + DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss") + ".png");
             b.Save(f, System.Drawing.Imaging.ImageFormat.Png);
             Clipboard.SetImage(b);
             pending = "кнопка СНИМОК ДЛЯ НАС"; StartCheck();
-            MessageBox.Show(this, "Снимок сохранён на рабочий стол и скопирован.\nОткройте WhatsApp, нажмите Ctrl+V и отправьте нам.\n\n" + f, Text);
+            MessageBox.Show(this, "Снимок сохранён в папку " + LogDir + " и скопирован.\nОткройте WhatsApp, нажмите Ctrl+V и отправьте нам.\n\n" + f, Text);
         }
         catch (Exception ex) { MessageBox.Show(this, "Снимок не получился: " + ex.Message + "\nСфотографируйте экран телефоном.", Text); }
     }
@@ -1368,11 +1417,16 @@ class MainForm : Form
     {
         var sb = new StringBuilder();
         sb.AppendLine("Мост " + Rel);
-        sb.AppendLine("Номер для специалиста: " + last.Port);
+        string port = last != null && !string.IsNullOrEmpty(last.Port) ? last.Port : "ещё не выдан";
+        sb.AppendLine("Номер для специалиста: " + port);
+        string st = busy ? "установка, шаг " + Math.Max(stepN, 0) + " из 7 · " + StepNames[Math.Min(Math.Max(stepN, 0), 7)] : last != null ? last.Head.Replace('\n', ' ') : "проверяю";
+        sb.AppendLine("Состояние: " + st);
+        if (busy && stepLine != "") sb.AppendLine("Последняя строка установки: " + stepLine);
         sb.AppendLine("ПК: " + Environment.MachineName + ", пользователь " + Environment.UserName);
         if (rdId != "") sb.AppendLine("RustDesk ID: " + rdId);
         if (rdPw != "") sb.AppendLine("Пароль RustDesk: " + rdPw);
-        if (!string.IsNullOrEmpty(last.Radmin)) sb.AppendLine("Radmin: " + last.Radmin);
+        if (last != null && !string.IsNullOrEmpty(last.Radmin)) sb.AppendLine("Radmin: " + last.Radmin);
+        if (SrvAlt != "" && goodHost == SrvAlt) sb.AppendLine("Связь с сервером: запасной путь через Radmin " + SrvAlt);
         return sb.ToString().TrimEnd();
     }
     static readonly string RdIdFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"ClaudeTunnel\rustdesk_id.txt");

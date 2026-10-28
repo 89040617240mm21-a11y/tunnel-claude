@@ -33,9 +33,9 @@ foreach ($name in $sec.Keys) {
 }
 
 $map = @{
-    SERVER = M 'host'; PORT = M 'port' '22'; SRV_NAME = Q (M 'srv_name'); HOST_ALIAS = M 'host_alias' 'tunnelsrv'
+    SERVER = M 'host'; SERVER_ALT = M 'host_alt'; PORT = M 'port' '22'; SRV_NAME = Q (M 'srv_name'); HOST_ALIAS = M 'host_alias' 'tunnelsrv'
     TUNNEL_USER = M 'tunnel_user' 'claude_tunnel'; ENROLL_USER = M 'enroll_user' 'claude_enroll'
-    TASK_NAME = Q (M 'task_name' 'Claude туннель'); JOURNAL = M 'journal' 'Журнал доступа Claude.txt'
+    TASK_NAME = Q (M 'task_name' 'Claude туннель'); JOURNAL = M 'journal' 'Журнал доступа Claude.txt'; LOG_DIR = Q (M 'log_dir' 'C:\Мост')   # журналы — в папку, не на столы (12980)
     FILES_URL = Q (M 'files_url'); SSH_FALLBACK_URL = Q (M 'ssh_fallback_url'); ENROLL_KEY = $enrollKey
     HOSTKEYS = $hostkeys; ALLOW_IPS = ($allow -join ', '); FROM_MAP = ($from -join '; ')
     RD_URL = Q (M 'rustdesk_url'); RD_SHA = M 'rustdesk_sha256'; RD_HOST = Q (M 'rustdesk_host'); RD_RELAY = Q (M 'rustdesk_relay')

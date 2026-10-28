@@ -25,12 +25,42 @@
 # Опыт одного ПК (Win10 1909, ssh 7.7): пути с прямыми слешами, имя сервера {{HOST_ALIAS}}, владелец ключа — Администраторы.
 $ErrorActionPreference = 'Stop'
 $Srv = '{{SERVER}}'; $SrvPort = {{PORT}}
+# 104.10: запасной адрес того же сервера (Radmin VPN) — прямой путь из-за границы до 16 рвётся или виснет (126, 12875);
+#   берём его, только если он отвечает за 3 с; туннель потом идёт туда, где прошла регистрация
+$SrvAlt = '{{SERVER_ALT}}'; $Srvs = @($Srv); if ($SrvAlt -and $SrvAlt -ne $Srv) { $Srvs += $SrvAlt }
+function Test-Tcp($h, $p, $ms) {
+    $c = New-Object Net.Sockets.TcpClient
+    try { $a = $c.BeginConnect($h, $p, $null, $null); ($a.AsyncWaitHandle.WaitOne($ms) -and $c.Connected) } catch { $false } finally { $c.Close() }
+}
+function Invoke-SshT($exe, $argline, $sec, $mark = '') {   # ssh с пределом времени: зависший обмен ключами не держит установку вечно
+    $pi = New-Object Diagnostics.ProcessStartInfo $exe, $argline
+    $pi.UseShellExecute = $false; $pi.RedirectStandardOutput = $true; $pi.RedirectStandardError = $true; $pi.CreateNoWindow = $true
+    $pi.RedirectStandardInput = $true   # 104.10 (126): без своего ввода ssh наследовал ввод окна установки и ждал его вечно — даём пустой и сразу закрываем
+    try { $pr = [Diagnostics.Process]::Start($pi) } catch { return @("не запустился ssh: $($_.Exception.Message)") }
+    try { $pr.StandardInput.Close() } catch {}
+    # 104.10 (126): ssh 8.1 с выводом в трубу получает ответ, но сам не закрывается — читаем по кускам и выходим, как только пришла метка ответа
+    $e = $pr.StandardError.ReadToEndAsync(); $sb = New-Object Text.StringBuilder; $buf = New-Object char[] 4096
+    $t = $pr.StandardOutput.ReadAsync($buf, 0, $buf.Length); $end = (Get-Date).AddSeconds($sec); $eof = $false
+    while ((Get-Date) -lt $end) {
+        if (-not $t.Wait(300)) { continue }
+        if ($t.Result -le 0) { $eof = $true; break }
+        [void]$sb.Append($buf, 0, $t.Result)
+        if ($mark -and $sb.ToString() -match $mark) { break }
+        $t = $pr.StandardOutput.ReadAsync($buf, 0, $buf.Length)
+    }
+    $got = $mark -and $sb.ToString() -match $mark
+    if (-not $pr.WaitForExit($(if ($eof -or $got) { 2000 } else { 0 }))) { try { $pr.Kill() } catch {} }
+    $err = if ($e.Wait(2000)) { $e.Result } else { '' }
+    $lines = @(($sb.ToString() + "`n" + $err) -split "`r?`n" | Where-Object { $_ -ne '' })
+    if (-not ($eof -or $got)) { $lines += "timed out: нет ответа за $sec с" }
+    $lines
+}
 # 104.9: туннель ищем двумя путями — по командной строке (WMI) и по соединению ssh.exe с сервером (на части ПК WMI не отдаёт
 #   командную строку процесса SYSTEM, и старый туннель не находился и не убивался — ПК PC, 22622). Убиваем через Планировщик + taskkill /F.
 function Get-TunnelPids {
     $r = @()
     try { $r += @(Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -EA Stop | Where-Object { $_.CommandLine -like '*ClaudeTunnel*' } | ForEach-Object { [int]$_.ProcessId }) } catch {}
-    try { $r += @(Get-NetTCPConnection -RemoteAddress $Srv -RemotePort $SrvPort -EA Stop | Where-Object { (Get-Process -Id $_.OwningProcess -EA 0).Name -eq 'ssh' } | ForEach-Object { [int]$_.OwningProcess }) } catch {}
+    foreach ($a in $Srvs) { try { $r += @(Get-NetTCPConnection -RemoteAddress $a -RemotePort $SrvPort -EA Stop | Where-Object { (Get-Process -Id $_.OwningProcess -EA 0).Name -eq 'ssh' } | ForEach-Object { [int]$_.OwningProcess }) } catch {} }
     @($r | Select-Object -Unique)
 }
 function Stop-Tunnel {
@@ -274,10 +304,11 @@ if ($bn -notmatch '^SSH-2\.0') {
 Write-Host '3/7 Программа ssh...' -ForegroundColor Cyan
 $ssh = @("$env:ProgramFiles\OpenSSH\ssh.exe", "$env:SystemRoot\System32\OpenSSH\ssh.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
 # 12539: встроенный ssh 7.7 (Windows Server 2019) теряет ответ обмена ключами — висит на «expecting KEX_ECDH_REPLY» с любым сервером (180).
-#   Старше 8 — берём ssh 9.5 из нашего MSI распаковкой в папку Моста (msiexec /a: без установки, службы не трогаем)
+#   104.10: встроенный 8.1 (Windows 10, Server 2019/2022) на 126 рвётся так же — «Connection reset» на обмене ключами, а ssh 10.5 с того же
+#   сервера в ту же минуту получает ответ за 3 с. Поэтому младше 9 — берём ssh 9.5 из нашего MSI распаковкой в папку Моста (msiexec /a: без установки, службы не трогаем)
 $own = "$Dir\ssh95\Program Files\OpenSSH\ssh.exe"
 if ((Test-Path $own) -and -not ($ssh -like "$env:ProgramFiles\*")) { $ssh = $own }
-elseif ($ssh -and ([version](Get-Item $ssh).VersionInfo.FileVersion).Major -lt 8) {
+elseif ($ssh -and ([version](Get-Item $ssh).VersionInfo.FileVersion).Major -lt 9) {
     Write-Host "   ssh $((Get-Item $ssh).VersionInfo.FileVersion) старый, с ним вход рвётся — беру ssh 9.5 с сервера {{SRV_NAME}}..." -ForegroundColor DarkYellow
     try {
         New-Item -ItemType Directory -Force $Dir | Out-Null
@@ -335,30 +366,38 @@ $ways = @(
     @{ kh = "-o UserKnownHostsFile=$D/known_hosts"; e = "$D/enroll_key"; t = "$D/tunnel_key" },
     @{ kh = ''; e = "$D/enroll_key"; t = "$D/tunnel_key" },
     @{ kh = "-o UserKnownHostsFile=`"$Dir\known_hosts`""; e = "`"$ek`""; t = "`"$key`"" })
-$ok = $null; $Port = $null; $ErrorActionPreference = 'Continue'
+$ok = $null; $Port = $null; $okSrv = $Srv; $ErrorActionPreference = 'Continue'
 # сервер иногда рвёт соединение посреди обмена ключами («Connection reset», 180, 12521) — 6 кругов с паузой
 # 12539: сброс — это очередь sshd на 16, а не неверный способ: тот же способ повторяем до 3 раз через 3/6 с, потом следующий
 for ($try = 1; $try -le 6 -and -not $Port; $try++) {
     if ($try -gt 1) { Write-Host "   круг $try из 6 через 10 секунд..." -ForegroundColor DarkYellow; Start-Sleep 10 }
-    foreach ($w in $ways) {
-        for ($r = 1; $r -le 3; $r++) {
-            $out = cmd /c "`"$ssh`" -T $base $($w.kh) -i $($w.e) {{ENROLL_USER}}@$Srv `"$ph $pub $extra`" 2>&1"
-            if (-not (($out -join ' ') -match 'reset|Connection closed|timed out|kex_exchange') -or $r -eq 3) { break }
-            Write-Host "   сервер сбросил соединение — повтор $($r + 1) из 3 через $(3 * $r) с" -ForegroundColor DarkYellow; Start-Sleep (3 * $r)
+    # запасной адрес — только если отвечает; с 2-го круга он первым, если основной не дал номер
+    $order = @($Srvs | Where-Object { $_ -eq $Srv -or (Test-Tcp $_ $SrvPort 3000) })
+    if ($try -gt 1 -and $order.Count -gt 1) { [array]::Reverse($order) }
+    foreach ($s in $order) {
+        if ($Port) { break }
+        if ($s -ne $Srv) { Write-Host "   пробую запасной путь $s (Radmin VPN)..." -ForegroundColor DarkYellow }
+        foreach ($w in $ways) {
+            for ($r = 1; $r -le 3; $r++) {
+                $out = Invoke-SshT $ssh "-T $base $($w.kh) -i $($w.e) {{ENROLL_USER}}@$s `"$ph $pub $extra`"" 60 'PORT=\d+\r?\n'
+                if (-not (($out -join ' ') -match 'reset|Connection closed|timed out|kex_exchange') -or $r -eq 3) { break }
+                Write-Host "   сервер сбросил соединение — повтор $($r + 1) из 3 через $(3 * $r) с" -ForegroundColor DarkYellow; Start-Sleep (3 * $r)
+            }
+            $m = $out | Select-String 'PORT=(\d+)' | Select-Object -First 1
+            if ($m) { $ok = $w; $okSrv = $s; $Port = $m.Matches[0].Groups[1].Value; break }
+            Write-Host "   $s, способ «$($w.kh)» — нет: $(($out | Select-Object -Last 2) -join ' | ')" -ForegroundColor DarkYellow
+            if (($out -join ' ') -match 'timed out') { break }   # адрес висит — остальные способы на нём не помогут, к следующему адресу
         }
-        $m = $out | Select-String 'PORT=(\d+)' | Select-Object -First 1
-        if ($m) { $ok = $w; $Port = $m.Matches[0].Groups[1].Value; break }
-        Write-Host "   способ «$($w.kh)» — нет: $(($out | Select-Object -Last 2) -join ' | ')" -ForegroundColor DarkYellow
     }
 }
 $ErrorActionPreference = 'Stop'
 if (-not $Port) { Write-Host '   Регистрация не прошла — пришлите текст этого окна.' -ForegroundColor Red; exit 1 }   # код 1 — окно не пишет «Готово» (12521)
 $pt = "$Dir\port.txt"
 try { if (Test-Path $pt) { cmd /c "takeown /f `"$pt`" /a >nul 2>&1 & icacls `"$pt`" /reset >nul 2>&1 & attrib -r -h -s `"$pt`" >nul 2>&1"; Remove-Item $pt -Force }; [IO.File]::WriteAllText($pt, "$ph $Port $pcName`r`n") } catch { Write-Host "   port.txt не записан ($($_.Exception.Message)) — продолжаю" -ForegroundColor DarkYellow }
-Write-Host "   НОМЕР КЛИЕНТА: $Port" -ForegroundColor Green
+Write-Host "   НОМЕР КЛИЕНТА: $Port$(if ($okSrv -ne $Srv) { "  (через запасной путь $okSrv)" })" -ForegroundColor Green
 
 Write-Host '6/7 Задача «Claude туннель» (от SYSTEM, при включении ПК и каждую минуту, если оборвался)...' -ForegroundColor Cyan
-$targ = "-N -T $base $($ok.kh) -i $($ok.t) -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -E $D/ssh.log -R 127.0.0.1:${Port}:127.0.0.1:22 {{TUNNEL_USER}}@$Srv"
+$targ = "-N -T $base $($ok.kh) -i $($ok.t) -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -E $D/ssh.log -R 127.0.0.1:${Port}:127.0.0.1:22 {{TUNNEL_USER}}@$okSrv"
 $act = New-ScheduledTaskAction -Execute $ssh -Argument $targ
 $trg = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1)))
 $set = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable

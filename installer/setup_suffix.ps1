@@ -11,7 +11,15 @@ try {
     Write-Host "Прямой вход по SSH (Radmin и интернет) разрешён только с: $($n -join ', ')" -ForegroundColor Green
 } catch { Write-Host "Правило брандмауэра SSH-Claude-In: $($_.Exception.Message)" -ForegroundColor Yellow }
 
-# 2) журнал «кто заходил и что делал» — на общий рабочий стол, каждый вход по SSH пишется сам
+# 2) журнал «кто заходил и что делал» — в папку {{LOG_DIR}} (104.10, Михаил 12980–12982: не на рабочие столы), каждый вход по SSH пишется сам
+try {
+    New-Item -ItemType Directory -Force '{{LOG_DIR}}' | Out-Null
+    $oldj = "$env:PUBLIC\Desktop\{{JOURNAL}}"
+    if (Test-Path $oldj) {   # журнал с общего стола (до 104.10) — дописываем в папку и убираем со стола
+        Add-Content '{{LOG_DIR}}\{{JOURNAL}}' ("---------- перенесено с рабочего стола $(Get-Date -f 'dd.MM.yyyy HH:mm') ----------`r`n" + [IO.File]::ReadAllText($oldj)) -Encoding UTF8
+        Remove-Item $oldj -Force
+    }
+} catch { Write-Host "Папка журналов {{LOG_DIR}}: $($_.Exception.Message)" -ForegroundColor Yellow }
 $ep = Get-ExecutionPolicy -Scope LocalMachine
 if ($ep -in 'Restricted', 'Undefined', 'AllSigned') {
     try { Set-ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -EA Stop; Write-Host "Политика скриптов: $ep -> RemoteSigned (нужно для журнала входов)" } catch {
@@ -25,7 +33,7 @@ if ($eff -in 'Restricted', 'AllSigned') { Write-Host "Журнал команд 
 else {
     $prof = "$PSHOME\profile.ps1"
     $block = @'
-# >>> Claude журнал SSH (программа «Туннель Claude») — каждый вход специалиста по SSH и его команды пишутся в журнал на рабочем столе
+# >>> Claude журнал SSH (программа «Туннель Claude») — каждый вход специалиста по SSH и его команды пишутся в журнал {{LOG_DIR}}
 if ($env:SSH_CLIENT -and -not $global:ClaudeSshLog) {
     $global:ClaudeSshLog = 1
     try {
@@ -35,7 +43,7 @@ if ($env:SSH_CLIENT -and -not $global:ClaudeSshLog) {
         $cfrom = @{ {{FROM_MAP}} }[$cip]
         if (-not $cfrom) { $cfrom = $cip }
         $ccmd = [Environment]::CommandLine; if ($ccmd.Length -gt 400) { $ccmd = $ccmd.Substring(0, 400) + ' …(полностью — в файле записи)' }
-        Add-Content "$env:PUBLIC\Desktop\{{JOURNAL}}" "$(Get-Date -f 'dd.MM.yyyy HH:mm:ss') | КОМАНДА | вход Windows: $env:USERNAME | $cfrom | $ccmd | запись: $cdir\$cid.txt" -Encoding UTF8
+        Add-Content '{{LOG_DIR}}\{{JOURNAL}}' "$(Get-Date -f 'dd.MM.yyyy HH:mm:ss') | КОМАНДА | вход Windows: $env:USERNAME | $cfrom | $ccmd | запись: $cdir\$cid.txt" -Encoding UTF8
         Start-Transcript -Path "$cdir\$cid.txt" -Append | Out-Null
     } catch {}
 }
@@ -45,6 +53,6 @@ if ($env:SSH_CLIENT -and -not $global:ClaudeSshLog) {
         $old = if (Test-Path $prof) { [IO.File]::ReadAllText($prof) } else { '' }
         $old = [regex]::Replace($old, '(?s)\r?\n?# >>> Claude журнал SSH.*?# <<< Claude журнал SSH\r?\n?', '')
         [IO.File]::WriteAllText($prof, ($old.TrimEnd() + "`r`n" + $block + "`r`n").TrimStart(), (New-Object Text.UTF8Encoding $true))
-        Write-Host "Журнал входов и команд включён: рабочий стол -> «Журнал доступа Claude.txt», полные записи — $env:ProgramData\ClaudeTunnel\sessions" -ForegroundColor Green
+        Write-Host "Журнал входов и команд включён: {{LOG_DIR}}\{{JOURNAL}}, полные записи — $env:ProgramData\ClaudeTunnel\sessions" -ForegroundColor Green
     } catch { Write-Host "Журнал команд не включён: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
