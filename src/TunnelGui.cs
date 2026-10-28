@@ -266,6 +266,7 @@ class MainForm : Form
     class Canvas : Panel { public Canvas() { DoubleBuffered = true; ResizeRedraw = true; } }
     const int TitleH = 40;
     Bitmap bgOn, bgOff; Rectangle rBtn, rCode, rMore, rLink, rMin, rMax, rClose, rRd, rUpd, rPwNew, rQuit; Point hover;
+    static readonly bool ShowQuit = Pf.Get("show_quit", "0") == "1";   // значок выключения слева внизу (13052: по умолчанию скрыт)
     // 103.9 (12521): повтор установки раз в 5 минут, пока туннель не встанет; обновление программы на лету; RustDesk и его ID в окне
     static readonly string UpdateUrl = Pf.Get("update_url", "");   // без расширения: рядом лежат .exe и .txt («103.9 SHA256»)
     DateTime retryAt = DateTime.MinValue, updAt = DateTime.Now.AddSeconds(40); int retryN; volatile bool gotPort, updBusy; string updText = "", rdId = "", rdPw = ""; volatile bool rdBusy;
@@ -464,8 +465,9 @@ class MainForm : Form
         }
         using (var f = new Font("Segoe UI", 10.5f, FontStyle.Bold)) using (var br = new SolidBrush(Color.FromArgb(255, 222, 175)))
         {
-            Text3D(g, updText != "" ? updText : "⟳ Обновить · " + Rel, f, br, rUpd, center);
-            if (rdPw != "") Text3D(g, "⟳ Сменить пароль", f, br, rPwNew, center);
+            // 104.13 (Михаил, 13047): «⟳» на Windows 7 — квадрат (нет в шрифте), убрали
+            Text3D(g, updText != "" ? updText : "Обновить · " + Rel, f, br, rUpd, center);
+            if (rdPw != "") Text3D(g, "Сменить пароль", f, br, rPwNew, center);
         }
         // внизу на картинке — ссылка на открытый код
         string url = SourceUrl.Replace("https://", "");
@@ -477,6 +479,9 @@ class MainForm : Form
             rLink = new Rectangle((int)(x + a - 4), (int)y, (int)bw, 22);
         }
         // слева внизу — значок выключения: закрыть Мост совсем, а не в трей; туннель (задача Windows) работает дальше (Михаил, 13037–13039)
+        // 104.13 (Михаил, 13052): скрыт — «уже не нужна»; вернуть — show_quit = 1 в profile.ini
+        rQuit = Rectangle.Empty;
+        if (!ShowQuit) return;
         rQuit = new Rectangle(10, h - 44, 34, 34);
         bool qh = rQuit.Contains(hover);
         using (var pth = Round(rQuit, 17))
@@ -1329,9 +1334,11 @@ class MainForm : Form
         if (busy || updBusy) return;
         if (retryAt != DateTime.MinValue && last != null && last.TaskSt > 0 && last.Overall == 1) { retryAt = DateTime.MinValue; retryN = 0; return; }   // встал сам
         if (retryAt != DateTime.MinValue && DateTime.Now >= retryAt) { retryAt = DateTime.MinValue; CheckUpdate(false, () => RunSetup("повтор " + (retryN + 1))); return; }
-        var uiv = last != null && last.Overall == 1 ? TimeSpan.FromHours(1) : TimeSpan.FromSeconds(15);   // 104.9: не поднят — каждые 15 с
+        // 104.13 (Михаил, 13048): Мост подключён — сам ничего не качает и не обновляет, чтобы случайно не сломать рабочий;
+        //   не подключён — проверка каждые 15 с, новую версию качает и ставит сразу. Кнопка «Обновить» работает всегда.
+        var uiv = TimeSpan.FromSeconds(15);
         if (updAt > DateTime.Now + uiv) updAt = DateTime.Now + uiv;
-        if (DateTime.Now >= updAt) { updAt = DateTime.Now + uiv; CheckUpdate(false); }
+        if (!(last != null && last.Overall == 1) && DateTime.Now >= updAt) { updAt = DateTime.Now + uiv; CheckUpdate(false); }
         if (rdId == "" && !rdBusy && DateTime.Now.Second % 10 < 5) { rdBusy = true; ThreadPool.QueueUserWorkItem(_ => { try { ReadRdId(); } finally { rdBusy = false; } }); }
     }
 
@@ -1357,7 +1364,7 @@ class MainForm : Form
                     if (parts.Length < 2 || Ver(parts[0]) <= Ver(Rel)) msg = "у вас последняя · " + Rel;
                     else
                     {
-                        if (manual) BeginInvoke(new Action(() => { updText = "качаю " + parts[0] + "..."; pCompact.Invalidate(); }));
+                        BeginInvoke(new Action(() => { updText = "качаю " + parts[0] + "..."; pCompact.Invalidate(); }));
                         string tmp = Path.Combine(Path.GetTempPath(), "ryadom_new.exe");
                         wc.DownloadFile(UpdateUrl + ".exe?t=" + DateTime.Now.Ticks, tmp);
                         string sha; using (var h = SHA256.Create()) using (var fs = File.OpenRead(tmp)) sha = BitConverter.ToString(h.ComputeHash(fs)).Replace("-", "");

@@ -2,14 +2,19 @@
 # === Добавка программы «Туннель Claude» версия 102 (26.10.2026, ответ 12436; 101 — ответ 12434) ===
 $ErrorActionPreference = 'Continue'
 # 1) прямой вход по SSH (Radmin VPN и интернет) — только с машин специалистов из профиля сборки
-try {
+if (-not (Get-Command Get-NetFirewallRule -EA 0)) {   # 104.13: Windows 7 — без модуля брандмауэра, правило через netsh
+    $add = @(@({{ALLOW_IPS}}) | Where-Object { $_ })
+    cmd /c "netsh advfirewall firewall delete rule name=SSH-Claude-In >nul 2>&1"
+    $o = cmd /c "netsh advfirewall firewall add rule name=SSH-Claude-In dir=in action=allow protocol=TCP localport=22 remoteip=$($add -join ',') 2>&1"
+    Write-Host "Прямой вход по SSH (Radmin и интернет) разрешён только с: $($add -join ', ') ($o)" -ForegroundColor Green
+} else { try {
     $r = Get-NetFirewallRule -Name 'SSH-Claude-In' -EA Stop
     $a = @((Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r).RemoteAddress)
     $add = @({{ALLOW_IPS}})
     $n = @($a + $add | Where-Object { $_ -and $_ -ne 'Any' } | Select-Object -Unique)
     Set-NetFirewallRule -Name 'SSH-Claude-In' -RemoteAddress $n
     Write-Host "Прямой вход по SSH (Radmin и интернет) разрешён только с: $($n -join ', ')" -ForegroundColor Green
-} catch { Write-Host "Правило брандмауэра SSH-Claude-In: $($_.Exception.Message)" -ForegroundColor Yellow }
+} catch { Write-Host "Правило брандмауэра SSH-Claude-In: $($_.Exception.Message)" -ForegroundColor Yellow } }
 
 # 2) журнал «кто заходил и что делал» — в папку {{LOG_DIR}} (104.10, Михаил 12980–12982: не на рабочие столы), каждый вход по SSH пишется сам
 try {
@@ -21,7 +26,7 @@ try {
     }
 } catch { Write-Host "Папка журналов {{LOG_DIR}}: $($_.Exception.Message)" -ForegroundColor Yellow }
 $ep = Get-ExecutionPolicy -Scope LocalMachine
-if ($ep -in 'Restricted', 'Undefined', 'AllSigned') {
+if (@('Restricted', 'Undefined', 'AllSigned') -contains $ep) {
     try { Set-ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -EA Stop; Write-Host "Политика скриптов: $ep -> RemoteSigned (нужно для журнала входов)" } catch {
         # PowerShell кидает «Ошибка безопасности», даже когда политика ЗАПИСАНА, но перекрыта Bypass самого установщика — проверяем факт
         if ((Get-ExecutionPolicy -Scope LocalMachine) -eq 'RemoteSigned') { Write-Host "Политика скриптов: $ep -> RemoteSigned (нужно для журнала входов)" }
@@ -29,7 +34,7 @@ if ($ep -in 'Restricted', 'Undefined', 'AllSigned') {
     }
 }
 $eff = Get-ExecutionPolicy
-if ($eff -in 'Restricted', 'AllSigned') { Write-Host "Журнал команд не включён: политика скриптов $eff (задана администратором). Входы всё равно видны в журнале." -ForegroundColor Yellow }
+if (@('Restricted', 'AllSigned') -contains $eff) { Write-Host "Журнал команд не включён: политика скриптов $eff (задана администратором). Входы всё равно видны в журнале." -ForegroundColor Yellow }
 else {
     $prof = "$PSHOME\profile.ps1"
     $block = @'

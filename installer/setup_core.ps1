@@ -32,7 +32,37 @@ function Test-Tcp($h, $p, $ms) {
     $c = New-Object Net.Sockets.TcpClient
     try { $a = $c.BeginConnect($h, $p, $null, $null); ($a.AsyncWaitHandle.WaitOne($ms) -and $c.Connected) } catch { $false } finally { $c.Close() }
 }
-function Invoke-SshT($exe, $argline, $sec, $mark = '') {   # ssh с пределом времени: зависший обмен ключами не держит установку вечно
+# 104.13 (Михаил, 13047): Windows 7 = PowerShell 2.0 на .NET 2 — нет -in/-notin, Get-CimInstance, Get-NetTCPConnection, Get-FileHash,
+#   Get-Content -Raw, командлетов брандмауэра и Планировщика, асинхронного чтения. Ниже — замены, работающие и на PS 2, и на 5.1.
+function Get-Sha256($f) { $h = [Security.Cryptography.SHA256]::Create(); $fs = [IO.File]::OpenRead($f); try { -join ($h.ComputeHash($fs) | ForEach-Object { $_.ToString('x2') }) } finally { $fs.Close() } }
+function Read-All($f) { [IO.File]::ReadAllText($f) }
+function Get-PortPids($local, $remote, $rport) {   # вместо Get-NetTCPConnection: разбор netstat -ano
+    foreach ($l in (netstat -ano -p tcp)) {
+        $c = @($l.Trim() -split '\s+'); if ($c.Count -lt 5 -or $c[0] -ne 'TCP') { continue }
+        if ($local -and $c[1] -match ":$local$" -and $c[3] -eq 'LISTENING') { [int]$c[4] }
+        if ($remote -and $c[2] -eq "${remote}:$rport" -and $c[3] -eq 'ESTABLISHED') { [int]$c[4] }
+    }
+}
+$NewPS = [bool](Get-Command Register-ScheduledTask -EA 0)   # Windows 8+ — командлеты Планировщика есть; Windows 7 — schtasks.exe
+function Invoke-SshFile($exe, $argline, $sec, $mark) {   # 104.13: PS 2 — вывод ssh в файлы, ждём метку или предел времени
+    $o = "$env:TEMP\claude_ssh_o.txt"; $e = "$env:TEMP\claude_ssh_e.txt"; $i = "$env:TEMP\claude_ssh_i.txt"
+    foreach ($f in $o, $e) { Remove-Item $f -EA 0 }; [IO.File]::WriteAllText($i, '')
+    try { $pr = Start-Process $exe -ArgumentList $argline -RedirectStandardOutput $o -RedirectStandardError $e -RedirectStandardInput $i -PassThru -WindowStyle Hidden } catch { return @("не запустился ssh: $($_.Exception.Message)") }
+    $end = (Get-Date).AddSeconds($sec); $got = $false
+    while ((Get-Date) -lt $end -and -not $pr.HasExited) {
+        Start-Sleep -Milliseconds 300
+        if ($mark -and (Test-Path $o) -and ((Read-Shared $o 50) -join "`n") -match $mark) { $got = $true; break }
+    }
+    $done = $pr.HasExited -or $got
+    if (-not $pr.HasExited) { try { $pr.Kill() } catch {} }
+    Start-Sleep -Milliseconds 300
+    $lines = @(); foreach ($f in $o, $e) { if (Test-Path $f) { $lines += @(Read-Shared $f 200 | Where-Object { $_ -notmatch '^\(не прочитан' }) } }
+    if ($got) { $lines += 'PORT-OK' }
+    if (-not $done) { $lines += "timed out: нет ответа за $sec с" }
+    $lines
+}
+function Invoke-SshT($exe, $argline, $sec, $mark = '') {
+    if ($PSVersionTable.PSVersion.Major -lt 3) { return (Invoke-SshFile $exe $argline $sec $mark) }   # ssh с пределом времени: зависший обмен ключами не держит установку вечно
     $pi = New-Object Diagnostics.ProcessStartInfo $exe, $argline
     $pi.UseShellExecute = $false; $pi.RedirectStandardOutput = $true; $pi.RedirectStandardError = $true; $pi.CreateNoWindow = $true
     $pi.RedirectStandardInput = $true   # 104.10 (126): без своего ввода ssh наследовал ввод окна установки и ждал его вечно — даём пустой и сразу закрываем
@@ -59,12 +89,12 @@ function Invoke-SshT($exe, $argline, $sec, $mark = '') {   # ssh с предел
 #   командную строку процесса SYSTEM, и старый туннель не находился и не убивался — ПК PC, 22622). Убиваем через Планировщик + taskkill /F.
 function Get-TunnelPids {
     $r = @()
-    try { $r += @(Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -EA Stop | Where-Object { $_.CommandLine -like '*ClaudeTunnel*' } | ForEach-Object { [int]$_.ProcessId }) } catch {}
-    foreach ($a in $Srvs) { try { $r += @(Get-NetTCPConnection -RemoteAddress $a -RemotePort $SrvPort -EA Stop | Where-Object { (Get-Process -Id $_.OwningProcess -EA 0).Name -eq 'ssh' } | ForEach-Object { [int]$_.OwningProcess }) } catch {} }
+    try { $r += @(Get-WmiObject Win32_Process -Filter "Name='ssh.exe'" -EA Stop | Where-Object { $_.CommandLine -like '*ClaudeTunnel*' } | ForEach-Object { [int]$_.ProcessId }) } catch {}
+    foreach ($a in $Srvs) { try { $r += @(Get-PortPids '' $a $SrvPort | Where-Object { (Get-Process -Id $_ -EA 0).Name -eq 'ssh' }) } catch {} }
     @($r | Select-Object -Unique)
 }
 function Stop-Tunnel {
-    Stop-ScheduledTask -TaskName '{{TASK_NAME}}' -EA 0
+    cmd /c "schtasks /End /TN `"{{TASK_NAME}}`" >nul 2>&1"
     foreach ($i in Get-TunnelPids) { cmd /c "taskkill /F /PID $i >nul 2>&1" }
 }
 function Read-Shared($f, $n) {   # ssh.log держит открытым живой ssh — читаем с общим доступом
@@ -75,8 +105,28 @@ $Url = '{{FILES_URL}}'
 $Dir = "$env:ProgramData\ClaudeTunnel"; $D = $Dir.Replace([char]92, [char]47)
 $pr = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Write-Host 'Запустите от имени администратора.' -ForegroundColor Red; return }
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]3072 } catch {}   # TLS 1.2 (на .NET 2 у перечисления нет имени Tls12)
 $wc = New-Object Net.WebClient
+# 104.13 (Михаил, 13049): на Windows 7 RustDesk не скачался — старый PowerShell не умеет TLS 1.2. Запасные пути: тот же адрес через
+#   Internet Explorer (IE 11 на Win7 умеет TLS 1.2), потом наша копия по http. Файлам по http верим только по контрольной сумме/подписи.
+$Mirror = '{{HTTP_MIRROR}}'; $MsiSha = '{{MSI_SHA}}'
+function Get-Urls($list) { $r = @("$list" -split '\|' | Where-Object { $_ }); if ($Mirror) { $r += @($r | ForEach-Object { "$Mirror/" + ($_ -split '/')[-1] }) }; $r | Select-Object -Unique }
+function Save-Url($u, $f) {
+    try { (New-Object Net.WebClient).DownloadFile($u, $f); return $true } catch { $e = $_.Exception.Message }
+    try { $x = New-Object -ComObject Msxml2.XMLHTTP.6.0; $x.open('GET', $u, $false); $x.send()
+        if ($x.status -eq 200) { [IO.File]::WriteAllBytes($f, [byte[]]$x.responseBody); return $true }; $e += " / через IE: код $($x.status)" } catch { $e += " / через IE: $($_.Exception.Message)" }
+    Write-Host "   не скачалось: $e" -ForegroundColor DarkYellow; $false
+}
+function Test-Trust($f, $sha, $who) {   # '' — файлу верим; иначе — почему нет
+    if (-not (Test-Path $f)) { return 'файла нет' }
+    $h = Get-Sha256 $f
+    if ($sha -and $h -ne $sha.ToLower()) { return "контрольная сумма не совпала ($h)" }
+    $sg = Get-AuthenticodeSignature $f
+    if ($sg.Status -eq 'Valid' -and $sg.SignerCertificate.Subject -like "*$who*") { return '' }
+    if ($sha) { Write-Host "   подпись Windows не проверила ($($sg.Status)) — на Windows 7 без обновления SHA-2 так бывает; контрольная сумма совпала" -ForegroundColor DarkYellow; return '' }
+    "подпись не $who ($($sg.Status))"
+}
+function Get-Msi($f) { foreach ($u in (Get-Urls "$Url/OpenSSH-Win64-v9.5.0.0.msi")) { Write-Host "   скачиваю: $u"; if (Save-Url $u $f) { $bad = Test-Trust $f $MsiSha 'Microsoft Corporation'; if (-not $bad) { return $true }; Write-Host "   $bad — не ставлю" -ForegroundColor Red; Remove-Item $f -EA 0 } }; $false }
 
 $ph = "$env:CLAUDE_PHONE" -replace '\D', ''
 if ($ph -match '^8\d{10}$') { $ph = '7' + $ph.Substring(1) }
@@ -97,18 +147,16 @@ else {
     if (-not (Test-Path $rdExe0)) {
         $rdTmp = "$env:SystemRoot\Temp\claude_rd"; New-Item -ItemType Directory -Force $rdTmp | Out-Null
         $rdF = "$rdTmp\rustdesk-setup.exe"; $got = $false
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        foreach ($u in ($rdUrl -split '\|')) {
-            if ($got -or -not $u) { continue }
+        foreach ($u in (Get-Urls $rdUrl)) {
+            if ($got) { continue }
             Write-Host "   скачиваю: $u"
-            try { (New-Object Net.WebClient).DownloadFile($u, $rdF) } catch { Write-Host "   не скачалось: $($_.Exception.Message)" -ForegroundColor DarkYellow; continue }
-            $h = (Get-FileHash $rdF -Algorithm SHA256).Hash.ToLower(); $sg = Get-AuthenticodeSignature $rdF
-            if ($rdSha -and $h -ne $rdSha.ToLower()) { Write-Host "   контрольная сумма не совпала ($h) — файл не запускаю" -ForegroundColor Red; Remove-Item $rdF -EA 0; continue }
-            if ($sg.Status -ne 'Valid' -or $sg.SignerCertificate.Subject -notlike '*PURSLANE*') { Write-Host "   подпись не RustDesk ($($sg.Status)) — файл не запускаю" -ForegroundColor Red; Remove-Item $rdF -EA 0; continue }
+            if (-not (Save-Url $u $rdF)) { continue }
+            $bad = Test-Trust $rdF $rdSha 'PURSLANE'
+            if ($bad) { Write-Host "   $bad — файл не запускаю" -ForegroundColor Red; Remove-Item $rdF -EA 0; continue }
             $got = $true
         }
         if ($got) {
-            Write-Host '   подпись RustDesk и контрольная сумма верны — ставлю тихо (до 2 минут)'
+            Write-Host '   файл RustDesk проверен — ставлю тихо (до 2 минут)'
             Start-Process $rdF -ArgumentList '--silent-install' -WindowStyle Hidden
             for ($i = 0; $i -lt 40 -and -not ((Test-Path $rdExe0) -and (Get-Service RustDesk -EA 0)); $i++) { Start-Sleep 3 }
             Start-Sleep 5
@@ -116,7 +164,7 @@ else {
     } else { Write-Host '   RustDesk уже установлен' }
     if ((Test-Path $rdExe0) -and $rdHost) {
         $rdToml = 'C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk2.toml'
-        $rdOk = { (Test-Path $rdToml) -and ((Get-Content $rdToml -Raw -Encoding UTF8) -match [regex]::Escape("custom-rendezvous-server = '$rdHost'")) }
+        $rdOk = { (Test-Path $rdToml) -and ((Read-All $rdToml) -match [regex]::Escape("custom-rendezvous-server = '$rdHost'")) }
         if (-not (& $rdOk)) {
             if ($rdCfg) { cmd.exe /c "`"$rdExe0`" --config $rdCfg" | Out-Null; Start-Sleep 4 }
             if (-not (& $rdOk)) {
@@ -151,17 +199,16 @@ if ($rvUrl) {
     if (Get-Service RvControlSvc -EA 0) { Write-Host '   Radmin VPN уже установлен' }
     else {
         $rvF = "$env:SystemRoot\Temp\claude_rd\radmin-vpn-setup.exe"; New-Item -ItemType Directory -Force (Split-Path $rvF) | Out-Null; $got = $false
-        foreach ($u in ($rvUrl -split '\|')) {
-            if ($got -or -not $u) { continue }
+        foreach ($u in (Get-Urls $rvUrl)) {
+            if ($got) { continue }
             Write-Host "   Radmin VPN, скачиваю: $u"
-            try { (New-Object Net.WebClient).DownloadFile($u, $rvF) } catch { Write-Host "   не скачалось: $($_.Exception.Message)" -ForegroundColor DarkYellow; continue }
-            $h = (Get-FileHash $rvF -Algorithm SHA256).Hash.ToLower(); $sg = Get-AuthenticodeSignature $rvF
-            if ($rvSha -and $h -ne $rvSha.ToLower()) { Write-Host "   контрольная сумма не совпала ($h) — файл не запускаю" -ForegroundColor Red; Remove-Item $rvF -EA 0; continue }
-            if ($sg.Status -ne 'Valid' -or $sg.SignerCertificate.Subject -notlike '*Famatech*') { Write-Host "   подпись не Famatech ($($sg.Status)) — файл не запускаю" -ForegroundColor Red; Remove-Item $rvF -EA 0; continue }
+            if (-not (Save-Url $u $rvF)) { continue }
+            $bad = Test-Trust $rvF $rvSha 'Famatech'
+            if ($bad) { Write-Host "   $bad — файл не запускаю" -ForegroundColor Red; Remove-Item $rvF -EA 0; continue }
             $got = $true
         }
         if ($got) {
-            Write-Host '   подпись Famatech и контрольная сумма верны — ставлю Radmin VPN тихо (до 3 минут)'
+            Write-Host '   файл Radmin VPN проверен — ставлю тихо (до 3 минут)'
             $p = Start-Process $rvF -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-' -PassThru -WindowStyle Hidden
             if (-not $p.WaitForExit(180000)) { $p.Kill() }
             Remove-Item $rvF -EA 0
@@ -181,25 +228,36 @@ Write-Host "ПК: $pcName   RustDesk: $(if ($rdId) { $rdId } else { 'нет' }) 
 
 Write-Host '2/7 SSH на этом ПК (вход только по ключу Claude)...' -ForegroundColor Cyan
 $ak = "$env:ProgramData\ssh\administrators_authorized_keys"
+$w7Url = '{{W7_URL}}'; $w7Sha = '{{W7_SHA}}'
+if (-not (Get-Service sshd -EA 0) -and $PSVersionTable.PSVersion.Major -lt 3 -and $w7Url) {
+    # 104.13 (13049): Windows 7 — OpenSSH 9.5 и встроенного компонента там нет; ставим проверенным рецептом для Win7 (OpenSSH 7.7, ответы 1897–1979)
+    Write-Host '   Windows 7 — ставлю OpenSSH 7.7 (версия для Windows 7)...'
+    $w7f = "$env:SystemRoot\Temp\claude_win7_ssh.ps1"
+    if ((Save-Url $w7Url $w7f) -and (Get-Sha256 $w7f) -eq $w7Sha) {
+        $ErrorActionPreference = 'Continue'
+        try { & ([scriptblock]::Create([IO.File]::ReadAllText($w7f).TrimStart([char]0xFEFF))) } catch { Write-Host "   рецепт Win7: $($_.Exception.Message)" -ForegroundColor Yellow }
+        $ErrorActionPreference = 'Stop'
+    } else { Write-Host '   рецепт Win7 не скачался или контрольная сумма не совпала — не запускаю' -ForegroundColor Red }
+    Remove-Item $w7f -EA 0
+}
 if (-not (Get-Service sshd -EA 0)) {
     # РЕЛИЗ 8: SSH нет — ставим сразу из НАШЕЙ копии установщика Microsoft на сервер: не зависит от обновлений Windows и GitHub
     #   (Windows в Parallels на Mac: DNS 10.211.55.1 не отвечает, Add-WindowsCapability 0x8024402c, api.github.com не найден)
     Write-Host '   SSH нет — ставлю OpenSSH Microsoft 9.5 с сервера {{SRV_NAME}}...'
     try {
-        $msi = "$env:TEMP\OpenSSH-Win64-v9.5.0.0.msi"; $wc.DownloadFile("$Url/OpenSSH-Win64-v9.5.0.0.msi", $msi)
-        $sig = Get-AuthenticodeSignature $msi
-        if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'CN=Microsoft Corporation') { Write-Host "   подпись установщика не Microsoft ($($sig.Status)) — не ставлю." -ForegroundColor Red }
+        $msi = "$env:TEMP\OpenSSH-Win64-v9.5.0.0.msi"
+        if (-not (Get-Msi $msi)) { Write-Host '   установщик не получил — не ставлю.' -ForegroundColor Red }
         else {
             $mp = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart ADDLOCAL=Client,Server /l*v `"$env:TEMP\openssh_msi.log`"" -Wait -PassThru
             Write-Host "   установщик: код $($mp.ExitCode) (0 — хорошо)"
-            if ($mp.ExitCode -notin 0, 3010) { Get-Content "$env:TEMP\openssh_msi.log" -EA 0 | Select-String 'error|failed|Return value 3' | Select-Object -Last 6 | ForEach-Object { Write-Host "     $_" } }
+            if (@(0, 3010) -notcontains $mp.ExitCode) { Get-Content "$env:TEMP\openssh_msi.log" -EA 0 | Select-String 'error|failed|Return value 3' | Select-Object -Last 6 | ForEach-Object { Write-Host "     $_" } }
             $cfg = "$env:ProgramData\ssh\sshd_config"
             if ((Get-Service sshd -EA 0) -and -not (Test-Path $cfg)) { Copy-Item "$env:ProgramFiles\OpenSSH\sshd_config_default" $cfg -EA 0 }
         }
         Remove-Item $msi -EA 0
     } catch { Write-Host "   с сервера {{SRV_NAME}} не поставился: $($_.Exception.Message) — пробую встроенный компонент Windows" -ForegroundColor Yellow }
 }
-if (-not (Get-Service sshd -EA 0) -or -not ((Test-Path $ak) -and ((Get-Content $ak -Raw) -match 'hetzner-1c'))) {
+if ($PSVersionTable.PSVersion.Major -ge 3 -and (-not (Get-Service sshd -EA 0) -or -not ((Test-Path $ak) -and ((Read-All $ak) -match 'hetzner-1c')))) {   # 104.13: этот рецепт — для Windows 8+
     & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString($wc.DownloadData('{{SSH_FALLBACK_URL}}')).TrimStart([char]0xFEFF)))
     $ErrorActionPreference = 'Stop'
 }
@@ -209,11 +267,11 @@ try { Start-Service sshd } catch {
     # РЕЛИЗ 3: служба есть, но не стартует (один ПК, 19.10) — сами ищем причину и чиним, всё пишем в лог
     $ErrorActionPreference = 'Continue'
     Write-Host "   служба sshd не запускается: $($_.Exception.Message)" -ForegroundColor Yellow
-    $svc = Get-CimInstance Win32_Service -Filter "Name='sshd'"
+    $svc = Get-WmiObject Win32_Service -Filter "Name='sshd'"
     $exe = ($svc.PathName -replace '^"([^"]+)".*$', '$1') -replace '^(\S+\.exe).*$', '$1'
     Write-Host "   служба: $($svc.PathName)  от: $($svc.StartName)  файл есть: $(Test-Path $exe)"
     Write-Host '   --- проверка настроек (sshd -t):'; cmd /c "`"$exe`" -t 2>&1" | ForEach-Object { Write-Host "     $_" }
-    Write-Host '   --- порт 22 занят?'; Get-NetTCPConnection -LocalPort 22 -State Listen -EA 0 | ForEach-Object { $pp = Get-Process -Id $_.OwningProcess -EA 0; Write-Host "     $($_.LocalAddress):22 — $($pp.ProcessName) $($pp.Path)" }
+    Write-Host '   --- порт 22 занят?'; Get-PortPids 22 '' 0 | Select-Object -Unique | ForEach-Object { $pp = Get-Process -Id $_ -EA 0; Write-Host "     :22 — $($pp.ProcessName) $($pp.Path)" }
     Write-Host '   --- папка ssh:'; Get-ChildItem "$env:ProgramData\ssh" -EA 0 | ForEach-Object { Write-Host "     $($_.Name)  $($_.Length)" }
     Write-Host '   --- журнал OpenSSH:'; Get-WinEvent -LogName 'OpenSSH/Operational' -MaxEvents 8 -EA 0 | ForEach-Object { Write-Host "     $($_.TimeCreated) $($_.Message)" }
     Write-Host '   --- журнал служб:'; Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; StartTime = (Get-Date).AddMinutes(-30) } -MaxEvents 30 -EA 0 | Where-Object { $_.Message -match 'ssh' } | Select-Object -First 6 | ForEach-Object { Write-Host "     $($_.TimeCreated) [$($_.Id)] $($_.Message)" }
@@ -231,7 +289,7 @@ try { Start-Service sshd } catch {
         Write-Host '   --- запуск вручную на 5 с (sshd -d):'
         $o = "$env:TEMP\sshd_d.txt"; $pd = Start-Process $exe -ArgumentList '-d' -RedirectStandardError $o -PassThru -WindowStyle Hidden
         Start-Sleep 5; Stop-Process -Id $pd.Id -Force -EA 0; Get-Content $o -EA 0 | Select-Object -Last 15 | ForEach-Object { Write-Host "     $_" }
-        $av = try { (Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -EA Stop).displayName -join ', ' } catch { '?' }
+        $av = try { (Get-WmiObject -Namespace root/SecurityCenter2 -Class AntiVirusProduct -EA Stop | ForEach-Object { $_.displayName }) -join ', ' } catch { '?' }
         Write-Host "   антивирус: $av"
         # РЕЛИЗ 5: 360 Total Security держит запуск любой sshd (встроенный и MSI Microsoft, один ПК) — сначала его успокоить
         $q = Get-Process -EA 0 | Where-Object { $_.ProcessName -match '^(360|QH|ZhuDongFangYu)' } | Select-Object -ExpandProperty ProcessName -Unique
@@ -252,26 +310,24 @@ try { Start-Service sshd } catch {
         for ($i = 0; $i -lt 15 -and (Get-Service sshd -EA 0); $i++) { Start-Sleep 2 }
         if (Get-Service sshd -EA 0) { Write-Host '   старая служба ещё не удалилась (закройте окно «Службы», если открыто)' -ForegroundColor Yellow }
         $msi = "$env:TEMP\OpenSSH-Win64-v9.5.0.0.msi"
-        try { $wc.DownloadFile("$Url/OpenSSH-Win64-v9.5.0.0.msi", $msi) } catch { Write-Host "   установщик не скачался: $($_.Exception.Message)" -ForegroundColor Red; Write-Host 'Пришлите этот лог Claude.' -ForegroundColor Red; return }
-        $sig = Get-AuthenticodeSignature $msi
-        if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'CN=Microsoft Corporation') { Write-Host "   подпись установщика не Microsoft ($($sig.Status)) — стоп." -ForegroundColor Red; Write-Host 'Пришлите этот лог Claude.' -ForegroundColor Red; return }
+        if (-not (Get-Msi $msi)) { Write-Host '   установщик не получил — стоп. Пришлите этот лог Claude.' -ForegroundColor Red; return }
         $ml = "$env:TEMP\openssh_msi.log"
         $mp = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart ADDLOCAL=Server /l*v `"$ml`"" -Wait -PassThru
         Write-Host "   установщик: код $($mp.ExitCode) (0 — хорошо)"
-        if ($mp.ExitCode -notin 0, 3010) { Get-Content $ml -EA 0 | Select-String 'error|failed|Return value 3' | Select-Object -Last 10 | ForEach-Object { Write-Host "     $_" }; Write-Host 'Пришлите этот лог Claude.' -ForegroundColor Red; return }
+        if (@(0, 3010) -notcontains $mp.ExitCode) { Get-Content $ml -EA 0 | Select-String 'error|failed|Return value 3' | Select-Object -Last 10 | ForEach-Object { Write-Host "     $_" }; Write-Host 'Пришлите этот лог Claude.' -ForegroundColor Red; return }
         Remove-Item $msi -EA 0
         $cfg = "$env:ProgramData\ssh\sshd_config"
         if (-not (Test-Path $cfg)) { Copy-Item "$env:ProgramFiles\OpenSSH\sshd_config_default" $cfg -EA 0 }
         Set-Service sshd -StartupType Automatic -EA 0
         try { Start-Service sshd -EA Stop } catch {
             Write-Host "   и новый не запускается: $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host "   служба: $((Get-CimInstance Win32_Service -Filter "Name='sshd'").PathName)"; Write-Host 'Пришлите этот лог Claude.' -ForegroundColor Red; return
+            Write-Host "   служба: $((Get-WmiObject Win32_Service -Filter "Name='sshd'").PathName)"; Write-Host 'Пришлите этот лог Claude.' -ForegroundColor Red; return
         }
         Write-Host '   новый OpenSSH запустился — ключ Claude, вход только по ключу, брандмауэр...' -ForegroundColor Green
         & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString($wc.DownloadData('{{SSH_FALLBACK_URL}}')).TrimStart([char]0xFEFF)))
         $ErrorActionPreference = 'Continue'
         # установщик мог открыть порт 22 всем — оставляем только наше правило (туннелю порт снаружи вообще не нужен)
-        Get-NetFirewallPortFilter -Protocol TCP -EA 0 | Where-Object { $_.LocalPort -contains '22' } | Get-NetFirewallRule -EA 0 | Where-Object { $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' -and $_.Name -ne 'SSH-Claude-In' } | Disable-NetFirewallRule -EA 0
+        if ($NewPS) { Get-NetFirewallPortFilter -Protocol TCP -EA 0 | Where-Object { $_.LocalPort -contains '22' } | Get-NetFirewallRule -EA 0 | Where-Object { $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' -and $_.Name -ne 'SSH-Claude-In' } | Disable-NetFirewallRule -EA 0 }
         if ((Get-Service sshd).Status -ne 'Running') { Start-Service sshd -EA 0 }
         if ((Get-Service sshd).Status -ne 'Running') { Write-Host '   SSH не работает — пришлите этот лог Claude.' -ForegroundColor Red; return }
     }
@@ -282,11 +338,11 @@ try { Start-Service sshd } catch {
 function Test-SshBanner {
     try {
         $c = New-Object Net.Sockets.TcpClient
-        if (-not $c.ConnectAsync('127.0.0.1', 22).Wait(3000)) { return '(порт 22 не отвечает)' }
+        $a = $c.BeginConnect('127.0.0.1', 22, $null, $null); if (-not ($a.AsyncWaitHandle.WaitOne(3000) -and $c.Connected)) { return '(порт 22 не отвечает)' }
         $st = $c.GetStream(); $st.ReadTimeout = 6000; $b = New-Object byte[] 80; $n = $st.Read($b, 0, 80); $c.Close()
         if ($n -le 0) { return '(соединение закрыто сразу)' }
         return [Text.Encoding]::ASCII.GetString($b, 0, $n).Trim()
-    } catch { return "($($_.Exception.InnerException.Message))" }
+    } catch { return "($($_.Exception.Message))" }
 }
 $bn = Test-SshBanner
 if ($bn -notmatch '^SSH-2\.0') {
@@ -307,17 +363,18 @@ $ssh = @("$env:ProgramFiles\OpenSSH\ssh.exe", "$env:SystemRoot\System32\OpenSSH\
 #   104.10: встроенный 8.1 (Windows 10, Server 2019/2022) на 126 рвётся так же — «Connection reset» на обмене ключами, а ssh 10.5 с того же
 #   сервера в ту же минуту получает ответ за 3 с. Поэтому младше 9 — берём ssh 9.5 из нашего MSI распаковкой в папку Моста (msiexec /a: без установки, службы не трогаем)
 $own = "$Dir\ssh95\Program Files\OpenSSH\ssh.exe"
-if ((Test-Path $own) -and -not ($ssh -like "$env:ProgramFiles\*")) { $ssh = $own }
+if ((Test-Path $own) -and -not ($ssh -like "$env:ProgramFiles\*") -and ((cmd /c "`"$own`" -V 2>&1") -match 'OpenSSH')) { $ssh = $own }
 elseif ($ssh -and ([version](Get-Item $ssh).VersionInfo.FileVersion).Major -lt 9) {
     Write-Host "   ssh $((Get-Item $ssh).VersionInfo.FileVersion) старый, с ним вход рвётся — беру ssh 9.5 с сервера {{SRV_NAME}}..." -ForegroundColor DarkYellow
     try {
         New-Item -ItemType Directory -Force $Dir | Out-Null
-        $msi = "$Dir\OpenSSH-Win64-v9.5.0.0.msi"; (New-Object Net.WebClient).DownloadFile("$Url/OpenSSH-Win64-v9.5.0.0.msi", $msi)
-        $sig = Get-AuthenticodeSignature $msi
-        if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { throw "подпись не Microsoft ($($sig.Status))" }
+        $msi = "$Dir\OpenSSH-Win64-v9.5.0.0.msi"
+        if (-not (Get-Msi $msi)) { throw 'установщик не получил' }
         Start-Process msiexec -ArgumentList "/a `"$msi`" /qn TARGETDIR=`"$Dir\ssh95`"" -Wait
         Remove-Item $msi -EA 0
-        if (Test-Path $own) { $ssh = $own } else { throw 'ssh.exe не распаковался' }
+        if (-not (Test-Path $own)) { throw 'ssh.exe не распаковался' }
+        # 104.13: на Windows 7 ssh 9.5 может не запуститься — тогда остаёмся на своём
+        if ((cmd /c "`"$own`" -V 2>&1") -match 'OpenSSH') { $ssh = $own } else { Remove-Item "$Dir\ssh95" -Recurse -Force -EA 0; throw 'ssh 9.5 на этой Windows не запускается' }
     } catch { Write-Host "   ssh 9.5 не получил: $($_.Exception.Message) — пробую старым" -ForegroundColor DarkYellow }
 }
 if (-not $ssh) { Write-Host '   ssh.exe не найден.' -ForegroundColor Red; return }
@@ -356,8 +413,8 @@ foreach ($f in $key, $ek) {
 }
 Write-Host "   права ключа: $(((icacls $key) -join ' ') -replace '\s+', ' ')"
 $g = "$env:ProgramData\ssh\ssh_known_hosts"     # общий файл доверенных серверов (ssh 7.7 читает его всегда)
-if (-not ((Test-Path $g) -and ((Get-Content $g -Raw) -match '{{HOST_ALIAS}} ssh-ed25519'))) { [IO.File]::AppendAllText($g, $hk) }
-$pub = (((Get-Content "$key.pub" -Raw).Trim()) -split ' ')[0..1] -join ' '
+if (-not ((Test-Path $g) -and ((Read-All $g) -match '{{HOST_ALIAS}} ssh-ed25519'))) { [IO.File]::AppendAllText($g, $hk) }
+$pub = (((Read-All "$key.pub").Trim()) -split ' ')[0..1] -join ' '
 
 Write-Host '5/7 Регистрация на сервере {{SRV_NAME}} и личный порт...' -ForegroundColor Cyan
 $base = "-p $SrvPort -o StrictHostKeyChecking=yes -o HostKeyAlias={{HOST_ALIAS}} -o HostKeyAlgorithms=ssh-ed25519,ecdsa-sha2-nistp256 -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 -o ConnectionAttempts=3 -o CheckHostIP=no"  # CheckHostIP=no: ssh 7.7 сам пишет [IP]:порт ecdsa и потом падает «Host key verification failed» (180, 12521)
@@ -396,16 +453,34 @@ $pt = "$Dir\port.txt"
 try { if (Test-Path $pt) { cmd /c "takeown /f `"$pt`" /a >nul 2>&1 & icacls `"$pt`" /reset >nul 2>&1 & attrib -r -h -s `"$pt`" >nul 2>&1"; Remove-Item $pt -Force }; [IO.File]::WriteAllText($pt, "$ph $Port $pcName`r`n") } catch { Write-Host "   port.txt не записан ($($_.Exception.Message)) — продолжаю" -ForegroundColor DarkYellow }
 Write-Host "   НОМЕР КЛИЕНТА: $Port$(if ($okSrv -ne $Srv) { "  (через запасной путь $okSrv)" })" -ForegroundColor Green
 
+# 104.13: Windows 7 — задача из XML через schtasks.exe (те же настройки: SYSTEM, при включении + каждую минуту, без предела времени)
+function Register-TaskXml($name, $exe, $arg, $desc, $repeat, $limit) {
+    $st = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss')
+    $rep = if ($repeat) { "<TimeTrigger><StartBoundary>$st</StartBoundary><Enabled>true</Enabled><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition></TimeTrigger>" } else { '' }
+    $lim = if ($limit) { $limit } else { 'PT0S' }
+    $x = '<?xml version="1.0" encoding="UTF-16"?>' + "`r`n" + '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">' +
+        "<RegistrationInfo><Description>$([Security.SecurityElement]::Escape($desc))</Description></RegistrationInfo>" +
+        "<Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger>$rep</Triggers>" +
+        '<Principals><Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>' +
+        "<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>$lim</ExecutionTimeLimit><Enabled>true</Enabled></Settings>" +
+        "<Actions Context=`"Author`"><Exec><Command>$([Security.SecurityElement]::Escape($exe))</Command><Arguments>$([Security.SecurityElement]::Escape($arg))</Arguments></Exec></Actions></Task>"
+    $xf = "$env:TEMP\claude_task.xml"; [IO.File]::WriteAllText($xf, $x, [Text.Encoding]::Unicode)
+    $o = cmd /c "schtasks /Create /F /TN `"$name`" /XML `"$xf`" 2>&1"; $rc = $LASTEXITCODE; Remove-Item $xf -EA 0
+    if ($rc -ne 0) { Write-Host "   задача «$name» не создалась: $o" -ForegroundColor Red }
+}
 Write-Host '6/7 Задача «Claude туннель» (от SYSTEM, при включении ПК и каждую минуту, если оборвался)...' -ForegroundColor Cyan
 $targ = "-N -T $base $($ok.kh) -i $($ok.t) -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -E $D/ssh.log -R 127.0.0.1:${Port}:127.0.0.1:22 {{TUNNEL_USER}}@$okSrv"
-$act = New-ScheduledTaskAction -Execute $ssh -Argument $targ
-$trg = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1)))
-$set = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+$tdesc = "Туннель на сервер {{SRV_NAME}} для специалиста: номер клиента $Port, ПК $pcName, сотовый $ph (общий РЕЛИЗ 9). Отключить — правой кнопкой -> Отключить."
 Stop-Tunnel
-Unregister-ScheduledTask -TaskName '{{TASK_NAME}}' -Confirm:$false -EA 0
-Register-ScheduledTask -TaskName '{{TASK_NAME}}' -Action $act -Trigger $trg -Settings $set -User 'SYSTEM' -RunLevel Highest -Description "Туннель на сервер {{SRV_NAME}} для специалиста: номер клиента $Port, ПК $pcName, сотовый $ph (общий РЕЛИЗ 9). Отключить — правой кнопкой -> Отключить." | Out-Null
+if ($NewPS) {
+    $act = New-ScheduledTaskAction -Execute $ssh -Argument $targ
+    $trg = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1)))
+    $set = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+    Unregister-ScheduledTask -TaskName '{{TASK_NAME}}' -Confirm:$false -EA 0
+    Register-ScheduledTask -TaskName '{{TASK_NAME}}' -Action $act -Trigger $trg -Settings $set -User 'SYSTEM' -RunLevel Highest -Description $tdesc | Out-Null
+} else { Register-TaskXml '{{TASK_NAME}}' $ssh $targ $tdesc $true '' }
 Remove-Item "$Dir\ssh.log" -EA 0
-Start-ScheduledTask -TaskName '{{TASK_NAME}}'
+cmd /c "schtasks /Run /TN `"{{TASK_NAME}}`" >nul 2>&1"
 
 Write-Host '7/7 Проверка (сервер вписывает новый ключ до 1 минуты)...' -ForegroundColor Cyan
 $desk = [Environment]::GetFolderPath('Desktop')
@@ -415,7 +490,7 @@ for ($i = 1; $i -le 24 -and -not $up; $i++) {
     Start-Sleep 5
     $p = Get-TunnelPids | Select-Object -First 1
     if ($p) { Start-Sleep 8; $up = [bool](Get-Process -Id $p -EA 0) }
-    if (-not $up -and $i % 4 -eq 0) { Start-ScheduledTask -TaskName '{{TASK_NAME}}' -EA 0; Write-Host "   жду... ($($i * 5) с)" }
+    if (-not $up -and $i % 4 -eq 0) { cmd /c "schtasks /Run /TN `"{{TASK_NAME}}`" >nul 2>&1"; Write-Host "   жду... ($($i * 5) с)" }
 }
 # РЕЛИЗ 7 (правило 9784): на каждом новом ПК сразу проверка на вирусы Защитником БЕЗ удаления (активаторы не трогаем, 6549);
 #   идёт в фоне от SYSTEM, после перезагрузки продолжает сама, пока в журнале нет DONE (урок одного ПК: перезагрузка оборвала проверку)
@@ -428,7 +503,7 @@ if ((Test-Path $log) -and (Select-String -Path $log -Pattern '^DONE' -Quiet)) { 
 if (-not (Test-Path $mp)) { "NO DEFENDER $(Get-Date -f 'dd.MM HH:mm:ss')" | Out-File $log -Append -Encoding utf8; return }
 "START $(Get-Date -f 'dd.MM HH:mm:ss')" | Out-File $log -Append -Encoding utf8
 & $mp -SignatureUpdate 2>&1 | Out-File $log -Append -Encoding utf8
-foreach ($d in (Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object { $_.DeviceID + '\' })) {
+foreach ($d in (Get-WmiObject Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object { $_.DeviceID + '\' })) {
     "=== $d $(Get-Date -f 'HH:mm:ss')" | Out-File $log -Append -Encoding utf8
     & $mp -Scan -ScanType 3 -File $d -DisableRemediation 2>&1 | Out-File $log -Append -Encoding utf8
     "=== $d конец $(Get-Date -f 'HH:mm:ss') код $LASTEXITCODE" | Out-File $log -Append -Encoding utf8
@@ -437,12 +512,14 @@ foreach ($d in (Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEac
 '@
     [IO.File]::WriteAllText("$vo\scan.ps1", $vs, (New-Object Text.UTF8Encoding $true))
     $vn = 'Claude проверка вирусов'
-    if (-not (Get-ScheduledTask -TaskName $vn -EA 0)) {
+    cmd /c "schtasks /Query /TN `"$vn`" >nul 2>&1"; $vHas = $LASTEXITCODE -eq 0
+    if (-not $vHas -and -not $NewPS) { Register-TaskXml $vn 'powershell.exe' "-NoProfile -ExecutionPolicy Bypass -File `"$vo\scan.ps1`"" 'Проверка на вирусы для специалиста Claude: Защитник БЕЗ удаления, только список находок. После DONE в журнале ничего не делает.' $false 'PT24H' }
+    elseif (-not $vHas) {
         $va = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$vo\scan.ps1`""
         $vset = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 24) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
         Register-ScheduledTask -TaskName $vn -Action $va -Trigger (New-ScheduledTaskTrigger -AtStartup) -Settings $vset -User 'SYSTEM' -RunLevel Highest -Description 'Проверка на вирусы для специалиста Claude: Защитник БЕЗ удаления, только список находок. После DONE в журнале ничего не делает.' | Out-Null
     }
-    if ((Get-ScheduledTask -TaskName $vn).State -ne 'Running') { Start-ScheduledTask -TaskName $vn }
+    if (-not ((cmd /c "schtasks /Query /TN `"$vn`" /FO CSV /NH 2>&1") -match 'Running|Выполняется')) { cmd /c "schtasks /Run /TN `"$vn`" >nul 2>&1" }
     Write-Host "Проверка на вирусы запущена в фоне (без удаления), журнал: $vo\scan.log" -ForegroundColor Green
 } catch { Write-Host "Проверка на вирусы не запустилась: $($_.Exception.Message)" -ForegroundColor Yellow }
 try { [IO.File]::WriteAllText((Join-Path $desk "Номер для специалиста $Port.txt"), "Номер для специалиста: $Port`r`nПК: $pcName`r`nRustDesk: $rdId`r`n", (New-Object Text.UTF8Encoding $true)) } catch {}
