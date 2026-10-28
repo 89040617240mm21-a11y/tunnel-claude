@@ -212,8 +212,10 @@ class MainForm : Form
         pCompact.MouseLeave += delegate { hover = Point.Empty; pCompact.Invalidate(); };
         pCompact.MouseMove += (s, e) =>
         {
+            bool wasQ = rQuit.Contains(hover);
             hover = e.Location; pCompact.Invalidate(new Rectangle(0, 0, pCompact.Width, TitleH));
-            pCompact.Cursor = rBtn.Contains(e.Location) || rCode.Contains(e.Location) && CodeShown || rLink.Contains(e.Location) || rAuto.Contains(e.Location) || rRd.Contains(e.Location) || rUpd.Contains(e.Location) || rPwNew.Contains(e.Location) ? Cursors.Hand : Cursors.Default;
+            if (wasQ != rQuit.Contains(e.Location)) pCompact.Invalidate(new Rectangle(0, rQuit.Y - 40, pCompact.Width, 90));
+            pCompact.Cursor = rQuit.Contains(e.Location) || rBtn.Contains(e.Location) || rCode.Contains(e.Location) && CodeShown || rLink.Contains(e.Location) || rAuto.Contains(e.Location) || rRd.Contains(e.Location) || rUpd.Contains(e.Location) || rPwNew.Contains(e.Location) ? Cursors.Hand : Cursors.Default;
         };
         pCompact.MouseDown += (s, e) =>   // тянем окно за верхнюю строку
         {
@@ -223,6 +225,7 @@ class MainForm : Form
         pCompact.MouseClick += (s, e) =>
         {
             if (rClose.Contains(e.Location)) Close();
+            else if (rQuit.Contains(e.Location)) { quitting = true; tray.Visible = false; Close(); }
             else if (rMin.Contains(e.Location)) WindowState = FormWindowState.Minimized;
                         else if (rBtn.Contains(e.Location)) { if (busy || last == null) return; if (last.TaskSt > 0 && last.Overall != 0) DoOff(); else DoOn(); }
             else if (rCode.Contains(e.Location) && CodeShown)
@@ -262,7 +265,7 @@ class MainForm : Form
 
     class Canvas : Panel { public Canvas() { DoubleBuffered = true; ResizeRedraw = true; } }
     const int TitleH = 40;
-    Bitmap bgOn, bgOff; Rectangle rBtn, rCode, rMore, rLink, rMin, rMax, rClose, rRd, rUpd, rPwNew; Point hover;
+    Bitmap bgOn, bgOff; Rectangle rBtn, rCode, rMore, rLink, rMin, rMax, rClose, rRd, rUpd, rPwNew, rQuit; Point hover;
     // 103.9 (12521): повтор установки раз в 5 минут, пока туннель не встанет; обновление программы на лету; RustDesk и его ID в окне
     static readonly string UpdateUrl = Pf.Get("update_url", "");   // без расширения: рядом лежат .exe и .txt («103.9 SHA256»)
     DateTime retryAt = DateTime.MinValue, updAt = DateTime.Now.AddSeconds(40); int retryN; volatile bool gotPort, updBusy; string updText = "", rdId = "", rdPw = ""; volatile bool rdBusy;
@@ -472,6 +475,27 @@ class MainForm : Form
             Text3D(g, "Открытый код: ", f, Brushes.White, new RectangleF(x, y, a + 4, 22), new StringFormat());
             using (var br = new SolidBrush(Color.FromArgb(255, 222, 175))) Text3D(g, url, fu, br, new RectangleF(x + a - 4, y, bw + 4, 22), new StringFormat());
             rLink = new Rectangle((int)(x + a - 4), (int)y, (int)bw, 22);
+        }
+        // слева внизу — значок выключения: закрыть Мост совсем, а не в трей; туннель (задача Windows) работает дальше (Михаил, 13037–13039)
+        rQuit = new Rectangle(10, h - 44, 34, 34);
+        bool qh = rQuit.Contains(hover);
+        using (var pth = Round(rQuit, 17))
+        {
+            using (var br = new SolidBrush(qh ? Color.FromArgb(230, 196, 43, 28) : Color.FromArgb(160, 30, 24, 20))) g.FillPath(br, pth);
+            using (var pen = new Pen(Color.FromArgb(150, 255, 222, 175), 1.3f)) g.DrawPath(pen, pth);
+        }
+        using (var pen = new Pen(qh ? Color.White : Color.FromArgb(255, 222, 175), 2.2f) { StartCap = System.Drawing.Drawing2D.LineCap.Round, EndCap = System.Drawing.Drawing2D.LineCap.Round })
+        {
+            float cx = rQuit.X + 17, cy = rQuit.Y + 18;
+            g.DrawArc(pen, cx - 8, cy - 8, 16, 16, -60, 300);
+            g.DrawLine(pen, cx, cy - 11, cx, cy - 2);
+        }
+        if (qh) using (var f = new Font("Segoe UI", 9.5f)) using (var br = new SolidBrush(Color.FromArgb(220, 20, 16, 14)))
+        {   // подсказка над значком
+            string tip = "Закрыть Мост совсем (туннель не выключится)";
+            var sz = g.MeasureString(tip, f); var tr = new RectangleF(rQuit.X, rQuit.Y - sz.Height - 8, sz.Width + 10, sz.Height + 4);
+            using (var pth = Round(tr, 6)) g.FillPath(br, pth);
+            g.DrawString(tip, f, Brushes.White, tr.X + 5, tr.Y + 2);
         }
     }
 
