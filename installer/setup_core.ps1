@@ -4,7 +4,8 @@
 # РЕЛИЗ 8 (19.10.2026, ответ 9867): SSH нет — ставит OpenSSH Microsoft из нашей копии на сервер
 #   (без Windows Update и GitHub; помогает и ПК без DNS), только если не вышло — старый путь ssh-claude.txt.
 #   port.txt: icacls /T с (OI)(CI) давал файлам пустой список доступа (один ПК, ответ 9866, правка чата №148).
-# РЕЛИЗ 7 (19.10.2026, ответ 9861): сразу после туннеля сам запускает проверку на вирусы
+# РЕЛИЗ 8 (30.10.2026, 14153): полной проверки Защитником больше нет — только быстрая (соединения наружу, удалённый доступ, автозапуск)
+# РЕЛИЗ 7 (19.10.2026, ответ 9861): сразу после туннеля сам запускал проверку на вирусы
 #   (Защитник без удаления, фоном от SYSTEM, после перезагрузки продолжает) — правило 9784.
 # РЕЛИЗ 6 (19.10.2026, ответ 9860): ключ туннеля «too open» (личное право пользователя от ssh-keygen) —
 #   права ключа задаются целиком заново (только SYSTEM и Администраторы), в лог — итоговые права.
@@ -492,36 +493,54 @@ for ($i = 1; $i -le 24 -and -not $up; $i++) {
     if ($p) { Start-Sleep 8; $up = [bool](Get-Process -Id $p -EA 0) }
     if (-not $up -and $i % 4 -eq 0) { cmd /c "schtasks /Run /TN `"{{TASK_NAME}}`" >nul 2>&1"; Write-Host "   жду... ($($i * 5) с)" }
 }
-# РЕЛИЗ 7 (правило 9784): на каждом новом ПК сразу проверка на вирусы Защитником БЕЗ удаления (активаторы не трогаем, 6549);
-#   идёт в фоне от SYSTEM, после перезагрузки продолжает сама, пока в журнале нет DONE (урок одного ПК: перезагрузка оборвала проверку)
+# РЕЛИЗ 8 (Михаил, 30.10, 14153): полную проверку Защитником убрали — грузила слабые ПК до 100 % и жар (A6, 2 ядра);
+#   вместо неё быстрая проверка за секунды: какие программы держат соединения наружу и какие программы удалённого доступа
+#   запущены или стоят в автозапуске — чтобы понять, сидит ли что-то лишнее. Ничего не удаляет и не сканирует диск.
 try {
     $vo = "$env:SystemRoot\Temp\claude_chk"; New-Item -ItemType Directory -Force $vo | Out-Null
-    $vs = @'
-# Проверка на вирусы Защитником БЕЗ удаления и карантина (-DisableRemediation): только список находок. РЕЛИЗ 2
-$o = "$env:SystemRoot\Temp\claude_chk"; $log = "$o\scan.log"; $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
-if ((Test-Path $log) -and (Select-String -Path $log -Pattern '^DONE' -Quiet)) { return }
-if (-not (Test-Path $mp)) { "NO DEFENDER $(Get-Date -f 'dd.MM HH:mm:ss')" | Out-File $log -Append -Encoding utf8; return }
-"START $(Get-Date -f 'dd.MM HH:mm:ss')" | Out-File $log -Append -Encoding utf8
-& $mp -SignatureUpdate 2>&1 | Out-File $log -Append -Encoding utf8
-foreach ($d in (Get-WmiObject Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object { $_.DeviceID + '\' })) {
-    "=== $d $(Get-Date -f 'HH:mm:ss')" | Out-File $log -Append -Encoding utf8
-    & $mp -Scan -ScanType 3 -File $d -DisableRemediation 2>&1 | Out-File $log -Append -Encoding utf8
-    "=== $d конец $(Get-Date -f 'HH:mm:ss') код $LASTEXITCODE" | Out-File $log -Append -Encoding utf8
-}
-"DONE $(Get-Date -f 'dd.MM HH:mm:ss')" | Out-File $log -Append -Encoding utf8
-'@
-    [IO.File]::WriteAllText("$vo\scan.ps1", $vs, (New-Object Text.UTF8Encoding $true))
-    $vn = 'Claude проверка вирусов'
-    cmd /c "schtasks /Query /TN `"$vn`" >nul 2>&1"; $vHas = $LASTEXITCODE -eq 0
-    if (-not $vHas -and -not $NewPS) { Register-TaskXml $vn 'powershell.exe' "-NoProfile -ExecutionPolicy Bypass -File `"$vo\scan.ps1`"" 'Проверка на вирусы для специалиста Claude: Защитник БЕЗ удаления, только список находок. После DONE в журнале ничего не делает.' $false 'PT24H' }
-    elseif (-not $vHas) {
-        $va = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$vo\scan.ps1`""
-        $vset = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 24) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-        Register-ScheduledTask -TaskName $vn -Action $va -Trigger (New-ScheduledTaskTrigger -AtStartup) -Settings $vset -User 'SYSTEM' -RunLevel Highest -Description 'Проверка на вирусы для специалиста Claude: Защитник БЕЗ удаления, только список находок. После DONE в журнале ничего не делает.' | Out-Null
+    $vn = 'Claude проверка вирусов'   # старая полная проверка с прошлых версий — снимаем
+    cmd /c "schtasks /Query /TN `"$vn`" >nul 2>&1"
+    if ($LASTEXITCODE -eq 0) { cmd /c "schtasks /End /TN `"$vn`" >nul 2>&1"; cmd /c "schtasks /Delete /TN `"$vn`" /F >nul 2>&1" }
+    $mpx = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+    if ((Get-Process MpCmdRun -EA 0) -and (Test-Path $mpx)) { & $mpx -Scan -Cancel 2>&1 | Out-Null }
+    $ra = 'anydesk|teamviewer|tv_w32|tv_x64|ammyy|aa_v3|rudesktop|winvnc|tvnserver|vncserver|uvnc|litemanager|romserver|romviewer|aeroadmin|supremo|screenconnect|connectwise|rutserv|rfusclient|dwagent|meshagent|splashtop|srservice|ngrok|frpc|chisel|cloudflared|ncat|^nc$|plink|getscreen|assistant|zerotier|hamachi|remcos|njrat|quasar|asyncrat'
+    $ours = '^(rustdesk|radmin|rserver3|ssh|sshd|TunnelClaude)$'
+    $pr = @{}; Get-WmiObject Win32_Process -EA 0 | ForEach-Object { $pr[[int]$_.ProcessId] = $_ }
+    $L = New-Object Collections.ArrayList
+    [void]$L.Add("БЫСТРАЯ ПРОВЕРКА $(Get-Date -f 'dd.MM.yyyy HH:mm:ss') ПК $env:COMPUTERNAME")
+    [void]$L.Add('--- Соединения наружу (программа, сколько адресов, путь, первые адреса):')
+    $cn = @{}
+    foreach ($ln in (netstat -ano 2>$null)) {
+        $f = @(($ln -split '\s+') | Where-Object { $_ })
+        if ($f.Count -lt 5 -or $f[0] -ne 'TCP' -or $f[3] -notmatch 'ESTABLISHED|УСТАНОВЛЕНО') { continue }
+        $rem = $f[2] -replace ':\d+$',''; if ($rem -match '^(127\.|\[::1\]|0\.0\.0\.0)') { continue }
+        $id = [int]$f[4]; $w = $pr[$id]; $nm = if ($w) { $w.Name -replace '\.exe$','' } else { "pid$id" }
+        $path = if ($w -and $w.ExecutablePath) { $w.ExecutablePath } else { '' }
+        $k = "$nm|$path"; if (-not $cn[$k]) { $cn[$k] = New-Object Collections.ArrayList }
+        if (-not $cn[$k].Contains($rem)) { [void]$cn[$k].Add($rem) }
     }
-    if (-not ((cmd /c "schtasks /Query /TN `"$vn`" /FO CSV /NH 2>&1") -match 'Running|Выполняется')) { cmd /c "schtasks /Run /TN `"$vn`" >nul 2>&1" }
-    Write-Host "Проверка на вирусы запущена в фоне (без удаления), журнал: $vo\scan.log" -ForegroundColor Green
-} catch { Write-Host "Проверка на вирусы не запустилась: $($_.Exception.Message)" -ForegroundColor Yellow }
+    foreach ($k in ($cn.Keys | Sort-Object)) {
+        $nm, $path = $k -split '\|', 2; $a = $cn[$k]
+        $mark = if ($nm -match $ours) { '' } elseif ($nm -match $ra) { '  <== УДАЛЁННЫЙ ДОСТУП' } elseif ($path -match '\\(Temp|Users\\Public)\\' -or ($nm -match '^pid')) { '  <== проверить' } else { '' }
+        [void]$L.Add("$nm ($($a.Count))  $path  $(($a | Select-Object -First 3) -join ', ')$mark")
+    }
+    [void]$L.Add('--- Программы удалённого доступа (запущены):')
+    $hit = $pr.Values | Where-Object { ($_.Name -replace '\.exe$','') -match $ra -and ($_.Name -replace '\.exe$','') -notmatch $ours } | ForEach-Object { "$($_.Name)  $($_.ExecutablePath)" } | Sort-Object -Unique
+    if ($hit) { $hit | ForEach-Object { [void]$L.Add($_) } } else { [void]$L.Add('нет (кроме наших RustDesk/Radmin/SSH)') }
+    [void]$L.Add('--- Автозапуск (Run):')
+    foreach ($rk in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run','HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run') {
+        $it = Get-ItemProperty $rk -EA 0; if (-not $it) { continue }
+        $it.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' } | ForEach-Object {
+            $v = "$($_.Value)"; $mark = if ($v -match $ra) { '  <== УДАЛЁННЫЙ ДОСТУП' } elseif ($v -match '\\(Temp|Users\\Public)\\') { '  <== проверить' } else { '' }
+            [void]$L.Add("$($_.Name) = $v$mark")
+        }
+    }
+    $av = try { (Get-WmiObject -Namespace root/SecurityCenter2 -Class AntiVirusProduct -EA Stop | ForEach-Object { $_.displayName }) -join ', ' } catch { '?' }
+    [void]$L.Add("--- Антивирус: $av")
+    [IO.File]::WriteAllLines("$vo\quick.log", [string[]]$L, (New-Object Text.UTF8Encoding $true))
+    $bad = @($L | Where-Object { $_ -match '<==' }).Count
+    Write-Host "Быстрая проверка (соединения и удалённый доступ): подозрительных строк $bad, журнал $vo\quick.log" -ForegroundColor $(if ($bad) { 'Yellow' } else { 'Green' })
+} catch { Write-Host "Быстрая проверка не прошла: $($_.Exception.Message)" -ForegroundColor Yellow }
 try { [IO.File]::WriteAllText((Join-Path $desk "Номер для специалиста $Port.txt"), "Номер для специалиста: $Port`r`nПК: $pcName`r`nRustDesk: $rdId`r`n", (New-Object Text.UTF8Encoding $true)) } catch {}
 if ($up) { Write-Host "`nГотово: туннель работает. НОМЕР КЛИЕНТА: $Port (ПК $pcName). Можно отключаться." -ForegroundColor Green }
 else {
